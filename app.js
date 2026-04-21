@@ -328,6 +328,10 @@ const state = {
   stocks: null,     // enriched runtime stocks
   portfolio: null,
   mcResult: null,
+  prevPrices: {},
+  prevKpi: {},
+  prevSignals: {},
+  prevAggregateSignal: null,
 };
 
 // ========== Enrichment ==========
@@ -383,6 +387,31 @@ function computePortfolioKpis(stocks) {
 // ========== Rendering ==========
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+const prefersReducedMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Count-up animation: interpolates numeric value through a formatter
+function animateNumber(el, from, to, formatter, duration = 600) {
+  if (!el) return;
+  if (from === to || !isFinite(from) || !isFinite(to) || prefersReducedMotion()) {
+    el.textContent = formatter(to);
+    return;
+  }
+  const start = performance.now();
+  const ease = (t) => 1 - Math.pow(1 - t, 4); // easeOutQuart
+  function frame(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const v = from + (to - from) * ease(t);
+    el.textContent = formatter(v);
+    if (t < 1) requestAnimationFrame(frame);
+    else {
+      el.classList.remove("landing");
+      void el.offsetWidth;
+      el.classList.add("landing");
+    }
+  }
+  requestAnimationFrame(frame);
+}
 
 function renderStrategyOptions() {
   const el = $("#strategy-options");
@@ -446,42 +475,68 @@ function deltaLabel(x) {
   return `<span class="${cls}"><span aria-hidden="true">${arrow}</span> ${pctFmt(x)}</span>`;
 }
 
-function renderKPIs() {
+let kpisBuilt = false;
+const kpiDefs = () => {
   const k = state.portfolio;
-  const s = state.stocks.length;
-  const kpis = [
-    { label: "Portfolio value", value: dollarFmt(k.value), sub: `${s} starred · equal weight`, mod: "accent" },
-    { label: "Today P&L", value: dollarFmt(k.pnl), sub: deltaLabel(k.pnlPct), isHtml: true, mod: k.pnl >= 0 ? "positive" : "negative", valueMod: k.pnl >= 0 ? "up" : "down" },
-    { label: "Expected return", value: pctFmt(k.expectedReturn), sub: `${state.horizon}-day · MC`, mod: k.expectedReturn >= 0 ? "positive" : "negative", valueMod: k.expectedReturn >= 0 ? "up" : "down" },
-    { label: "95% VaR", value: pctFmt(k.var95), sub: "5th percentile", mod: "negative", valueMod: "down" },
-    { label: "Sharpe", value: k.sharpe.toFixed(2), sub: "Ex-ante · rf 4.5%", mod: "accent" },
-    { label: "Crowd score", value: pctFmt(k.sentimentScore, 0), sub: "X net · pos − neg", mod: k.sentimentScore >= 0 ? "positive" : "negative", valueMod: k.sentimentScore >= 0 ? "up" : "down" },
+  return [
+    { id: "kpi-value",  label: "Portfolio value", value: k.value,           fmt: (v) => dollarFmt(v), mod: "accent",                              sub: `${state.stocks.length} starred · equal weight` },
+    { id: "kpi-pnl",    label: "Today P&L",       value: k.pnl,             fmt: (v) => dollarFmt(v), mod: k.pnl >= 0 ? "positive" : "negative",  valueMod: k.pnl >= 0 ? "up" : "down", subHtml: deltaLabel(k.pnlPct) },
+    { id: "kpi-er",     label: "Expected return", value: k.expectedReturn,  fmt: (v) => pctFmt(v),    mod: k.expectedReturn >= 0 ? "positive" : "negative", valueMod: k.expectedReturn >= 0 ? "up" : "down", sub: `${state.horizon}-day · MC` },
+    { id: "kpi-var",    label: "95% VaR",         value: k.var95,           fmt: (v) => pctFmt(v),    mod: "negative", valueMod: "down",           sub: "5th percentile" },
+    { id: "kpi-sharpe", label: "Sharpe",          value: k.sharpe,          fmt: (v) => v.toFixed(2), mod: "accent",                              sub: "Ex-ante · rf 4.5%" },
+    { id: "kpi-sent",   label: "Crowd score",     value: k.sentimentScore,  fmt: (v) => pctFmt(v, 0), mod: k.sentimentScore >= 0 ? "positive" : "negative", valueMod: k.sentimentScore >= 0 ? "up" : "down", sub: "X net · pos − neg" },
   ];
-  $("#kpi-strip").innerHTML = kpis.map((k) => {
-    const sub = k.isHtml ? k.sub : `<span class="kpi-sub">${k.sub}</span>`;
-    return `
-      <div class="kpi ${k.mod || ""}">
-        <p class="kpi-label">${k.label}</p>
-        <p class="kpi-value ${k.valueMod || ""}">${k.value}</p>
-        ${k.isHtml ? `<p class="kpi-sub">${k.sub}</p>` : sub}
+};
+
+function renderKPIs() {
+  const defs = kpiDefs();
+  if (!kpisBuilt) {
+    $("#kpi-strip").innerHTML = defs.map((d) => `
+      <div class="kpi ${d.mod}" id="${d.id}">
+        <p class="kpi-label">${d.label}</p>
+        <p class="kpi-value ${d.valueMod || ""}" data-val>${d.fmt(d.value)}</p>
+        <p class="kpi-sub" data-sub></p>
       </div>
-    `;
-  }).join("");
+    `).join("");
+    kpisBuilt = true;
+    state.prevKpi = {};
+  }
+  defs.forEach((d) => {
+    const wrap = $(`#${d.id}`);
+    if (!wrap) return;
+    wrap.className = `kpi ${d.mod}`;
+    const val = wrap.querySelector("[data-val]");
+    val.className = `kpi-value ${d.valueMod || ""}`;
+    const sub = wrap.querySelector("[data-sub]");
+    const prev = state.prevKpi[d.id] ?? d.value;
+    animateNumber(val, prev, d.value, d.fmt, 520);
+    state.prevKpi[d.id] = d.value;
+    if (d.subHtml) sub.innerHTML = d.subHtml;
+    else sub.textContent = d.sub || "";
+  });
 
   // Right rail
   const buys = state.stocks.filter((x) => getCombinedSignalForStock(x).signal === "BUY").length;
   const sells = state.stocks.filter((x) => getCombinedSignalForStock(x).signal === "SELL").length;
   const avgProbUp = state.stocks.reduce((a, x) => a + x.mcSummary.probUp, 0) / state.stocks.length;
+  const k = state.portfolio;
 
-  setText("#rail-winrate-val", (avgProbUp * 100).toFixed(1) + "%");
-  $("#rail-winrate-val").className = "rail-box-value " + (avgProbUp >= 0.5 ? "up" : "down");
-  setText("#rail-sharpe-val", k.sharpe.toFixed(2));
-  setText("#rail-er-val", pctFmt(k.expectedReturn));
-  $("#rail-er-val").className = "rail-box-value " + (k.expectedReturn >= 0 ? "up" : "down");
+  const railUpdates = [
+    { sel: "#rail-winrate-val", value: avgProbUp * 100,      fmt: (v) => v.toFixed(1) + "%", up: avgProbUp >= 0.5 },
+    { sel: "#rail-sharpe-val",  value: k.sharpe,             fmt: (v) => v.toFixed(2),       up: null },
+    { sel: "#rail-er-val",      value: k.expectedReturn,     fmt: (v) => pctFmt(v),          up: k.expectedReturn >= 0 },
+    { sel: "#rail-var-val",     value: k.var95,              fmt: (v) => pctFmt(v),          up: false },
+    { sel: "#rail-sent-val",    value: k.sentimentScore,     fmt: (v) => pctFmt(v, 0),       up: k.sentimentScore >= 0 },
+  ];
+  railUpdates.forEach((r) => {
+    const el = $(r.sel);
+    if (!el) return;
+    if (r.up !== null) el.className = "rail-box-value " + (r.up ? "up" : "down");
+    const prev = state.prevKpi[r.sel] ?? r.value;
+    animateNumber(el, prev, r.value, r.fmt, 520);
+    state.prevKpi[r.sel] = r.value;
+  });
   setText("#rail-er-sub", `Portfolio · ${state.horizon}d`);
-  setText("#rail-var-val", pctFmt(k.var95));
-  setText("#rail-sent-val", pctFmt(k.sentimentScore, 0));
-  $("#rail-sent-val").className = "rail-box-value " + (k.sentimentScore >= 0 ? "up" : "down");
   setText("#rail-buys-val", `${buys} / ${sells}`);
   setText("#rail-buys-sub", `${state.stocks.length} starred total`);
 
@@ -500,6 +555,24 @@ function setText(sel, txt) {
 
 function renderStocksTable() {
   const body = $("#stocks-body");
+
+  // Compute per-ticker price deltas and signal changes before re-rendering
+  const priceChanges = {};
+  const signalChanges = {};
+  for (const s of state.stocks) {
+    const prev = state.prevPrices[s.ticker];
+    if (prev != null && Math.abs(prev - s.price) > 1e-6) {
+      priceChanges[s.ticker] = s.price > prev ? "up" : "down";
+    }
+    state.prevPrices[s.ticker] = s.price;
+
+    const combined = getCombinedSignalForStock(s).signal;
+    if (state.prevSignals[s.ticker] && state.prevSignals[s.ticker] !== combined) {
+      signalChanges[s.ticker] = true;
+    }
+    state.prevSignals[s.ticker] = combined;
+  }
+
   let rows = state.stocks.map((s) => {
     const sig = getCombinedSignalForStock(s);
     return { ...s, combinedSignal: sig };
@@ -549,6 +622,40 @@ function renderStocksTable() {
   if (activeBtn) {
     activeBtn.closest("th").setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
   }
+
+  // Tick-flash on price cells for any ticker whose price moved
+  if (!prefersReducedMotion()) {
+    Object.entries(priceChanges).forEach(([ticker, dir]) => {
+      const row = body.querySelector(`tr[data-ticker="${ticker}"]`);
+      if (!row) return;
+      const priceCell = row.children[2];
+      if (!priceCell) return;
+      const color = dir === "up" ? "rgba(0,255,136,0.28)" : "rgba(255,51,102,0.28)";
+      const text  = dir === "up" ? "#00ff88" : "#ff3366";
+      priceCell.animate(
+        [
+          { backgroundColor: color,          color: text,            boxShadow: `inset 0 0 0 1px ${text}` },
+          { backgroundColor: "transparent",  color: "",              boxShadow: "inset 0 0 0 0 transparent" },
+        ],
+        { duration: 720, easing: "cubic-bezier(0.22,1,0.36,1)", fill: "none" }
+      );
+    });
+    // Pop action-badge when the combined signal flips
+    Object.keys(signalChanges).forEach((ticker) => {
+      const row = body.querySelector(`tr[data-ticker="${ticker}"]`);
+      if (!row) return;
+      const badge = row.querySelector(".badge");
+      if (!badge) return;
+      badge.animate(
+        [
+          { transform: "scale(0.94)" },
+          { transform: "scale(1.06)" },
+          { transform: "scale(1)" },
+        ],
+        { duration: 320, easing: "cubic-bezier(0.25,1,0.5,1)" }
+      );
+    });
+  }
 }
 
 function convictionFromStock(s) {
@@ -580,9 +687,9 @@ function getCombinedSignalForStock(s) {
   return { ...combined, perStrategy };
 }
 
-function renderDetail() {
+function renderDetail(onComplete) {
   const stock = state.stocks.find((s) => s.ticker === state.selectedTicker);
-  if (!stock) return;
+  if (!stock) { if (onComplete) onComplete(); return; }
 
   $("#detail-ticker").textContent = stock.ticker;
   $("#detail-ticker-2").textContent = stock.ticker;
@@ -597,7 +704,7 @@ function renderDetail() {
     ? state.mcResult
     : runMCForStock(stock);
   state.mcResult = { ...mc, ticker: stock.ticker };
-  renderChart(mc, stock);
+  renderChart(mc, stock, onComplete);
 
   // Sentiment
   renderSentiment(stock);
@@ -611,25 +718,20 @@ function runMCForStock(stock) {
   return monteCarlo({ S0: stock.price, mu: stock.mu, sigma: stock.sigma, days: state.horizon, nPaths: state.sims, seed });
 }
 
-function renderChart(mc, stock) {
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function renderChart(mc, stock, onComplete) {
   const svgW = 720, svgH = 300;
   const padL = 56, padR = 12, padT = 12, padB = 34;
   const innerW = svgW - padL - padR, innerH = svgH - padT - padB;
   const days = mc.days;
 
-  // Compute y range from percentile bands (with a margin)
   let yMin = Infinity, yMax = -Infinity;
   for (let d = 0; d <= days; d++) {
     if (mc.percentiles.p05[d] < yMin) yMin = mc.percentiles.p05[d];
     if (mc.percentiles.p95[d] > yMax) yMax = mc.percentiles.p95[d];
   }
-  for (const path of mc.samplePaths) {
-    for (const p of path) {
-      if (p < yMin) yMin = p;
-      if (p > yMax) yMax = p;
-    }
-  }
-  // add margin
+  for (const path of mc.samplePaths) for (const p of path) { if (p < yMin) yMin = p; if (p > yMax) yMax = p; }
   const pad = (yMax - yMin) * 0.05 || 1;
   yMin -= pad; yMax += pad;
 
@@ -638,12 +740,9 @@ function renderChart(mc, stock) {
 
   const toPath = (arr) => {
     let d = "";
-    for (let i = 0; i < arr.length; i++) {
-      d += (i === 0 ? "M" : "L") + xScale(i).toFixed(1) + "," + yScale(arr[i]).toFixed(1) + " ";
-    }
+    for (let i = 0; i < arr.length; i++) d += (i === 0 ? "M" : "L") + xScale(i).toFixed(1) + "," + yScale(arr[i]).toFixed(1) + " ";
     return d;
   };
-
   const bandPath = () => {
     let d = "";
     for (let i = 0; i <= days; i++) d += (i === 0 ? "M" : "L") + xScale(i) + "," + yScale(mc.percentiles.p95[i]) + " ";
@@ -651,47 +750,36 @@ function renderChart(mc, stock) {
     return d + "Z";
   };
 
-  // Y gridlines
   const gridVals = [];
   for (let i = 0; i <= 4; i++) gridVals.push(yMin + (yMax - yMin) * (i / 4));
 
-  // Summary for caption + SR table
   const s = mc.summary;
   const captionText = `${mc.nPaths.toLocaleString()} Monte Carlo paths over ${mc.days} trading days. Expected return ${pctFmt(s.expectedReturn)}, median ${pctFmt(s.medianReturn)}, 95% CI ${pctFmt(s.ci95Low)} to ${pctFmt(s.ci95High)}, probability of gain ${(s.probUp * 100).toFixed(0)}%.`;
-
   const chartAriaLabel = `${stock.ticker} Monte Carlo chart. ${captionText}`;
 
-  const svg = `
+  // Build frame SVG with placeholders that will be animated in
+  $("#mc-chart").innerHTML = `
     <svg viewBox="0 0 ${svgW} ${svgH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeAttr(chartAriaLabel)}">
       <rect x="0" y="0" width="${svgW}" height="${svgH}" fill="transparent"></rect>
-      <!-- y gridlines -->
       ${gridVals.map((v) => `
-        <line x1="${padL}" x2="${svgW - padR}" y1="${yScale(v)}" y2="${yScale(v)}" stroke="#242c38" stroke-dasharray="2 4" />
-        <text x="${padL - 8}" y="${yScale(v) + 4}" fill="#a8b0bd" font-size="10" text-anchor="end" font-family="ui-monospace, monospace">$${v.toFixed(0)}</text>
+        <line x1="${padL}" x2="${svgW - padR}" y1="${yScale(v)}" y2="${yScale(v)}" stroke="#1a2029" stroke-dasharray="2 4" />
+        <text x="${padL - 8}" y="${yScale(v) + 4}" fill="#7f8693" font-size="10" text-anchor="end" font-family="JetBrains Mono, monospace">$${v.toFixed(0)}</text>
       `).join("")}
-      <!-- x axis labels -->
       ${[0, Math.floor(days / 2), days].map((d) => `
-        <text x="${xScale(d)}" y="${svgH - 12}" fill="#a8b0bd" font-size="10" text-anchor="middle">Day ${d}</text>
+        <text x="${xScale(d)}" y="${svgH - 12}" fill="#7f8693" font-size="10" text-anchor="middle" font-family="JetBrains Mono, monospace">DAY ${d}</text>
       `).join("")}
-      <!-- confidence band -->
-      <path d="${bandPath()}" fill="rgba(96,165,250,0.10)" stroke="none"></path>
-      <!-- sample paths -->
-      ${mc.samplePaths.map((p) => `<path d="${toPath(p)}" fill="none" stroke="#60a5fa" stroke-opacity="0.18" stroke-width="1"></path>`).join("")}
-      <!-- median -->
-      <path d="${toPath(mc.percentiles.p50)}" fill="none" stroke="#60a5fa" stroke-width="2.5" stroke-linecap="round"></path>
-      <!-- p05/p95 dashed -->
-      <path d="${toPath(mc.percentiles.p05)}" fill="none" stroke="#60a5fa" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.85"></path>
-      <path d="${toPath(mc.percentiles.p95)}" fill="none" stroke="#60a5fa" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.85"></path>
-      <!-- starting price marker -->
-      <line x1="${padL}" y1="${yScale(mc.S0)}" x2="${svgW - padR}" y2="${yScale(mc.S0)}" stroke="#e8eaed" stroke-opacity="0.2" stroke-width="1" stroke-dasharray="2 2"></line>
-      <text x="${svgW - padR}" y="${yScale(mc.S0) - 4}" fill="#a8b0bd" font-size="10" text-anchor="end">S₀ = $${mc.S0.toFixed(2)}</text>
+      <line x1="${padL}" y1="${yScale(mc.S0)}" x2="${svgW - padR}" y2="${yScale(mc.S0)}" stroke="#d6dce4" stroke-opacity="0.18" stroke-width="1" stroke-dasharray="2 2"></line>
+      <text x="${svgW - padR}" y="${yScale(mc.S0) - 4}" fill="#7f8693" font-size="10" text-anchor="end" font-family="JetBrains Mono, monospace">S₀ = $${mc.S0.toFixed(2)}</text>
+      <g id="paths-layer"></g>
+      <path id="mc-band" d="${bandPath()}" fill="rgba(0,255,136,0.08)" stroke="none" opacity="0"></path>
+      <path id="mc-p05" d="${toPath(mc.percentiles.p05)}" fill="none" stroke="#00ff88" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.6" opacity="0"></path>
+      <path id="mc-p95" d="${toPath(mc.percentiles.p95)}" fill="none" stroke="#00ff88" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.6" opacity="0"></path>
+      <path id="mc-median" d="${toPath(mc.percentiles.p50)}" fill="none" stroke="#00ff88" stroke-width="2.25" stroke-linecap="round" opacity="0"></path>
+      <text id="mc-counter" x="${padL}" y="${padT + 14}" font-size="11" text-anchor="start">0 / ${mc.nPaths.toLocaleString()} PATHS</text>
     </svg>
   `;
 
-  $("#mc-chart").innerHTML = svg;
   $("#mc-caption").textContent = captionText;
-
-  // SR data table
   const body = $("#mc-data-body");
   body.innerHTML = [
     ["Ticker", stock.ticker],
@@ -706,6 +794,76 @@ function renderChart(mc, stock) {
     ["Mean final price", priceFmt(s.meanPrice)],
     ["Median final price", priceFmt(s.medianPrice)],
   ].map(([k, v]) => `<tr><th scope="row">${k}</th><td>${v}</td></tr>`).join("");
+
+  // === Animate draw ===
+  const figure = document.querySelector(".chart-wrap");
+  const layer = $("#paths-layer");
+  const counter = $("#mc-counter");
+  const reduced = prefersReducedMotion();
+
+  const drawPaths = () => {
+    const paths = mc.samplePaths.map((arr, i) => {
+      const p = document.createElementNS(SVG_NS, "path");
+      p.setAttribute("d", toPath(arr));
+      p.setAttribute("fill", "none");
+      p.setAttribute("stroke", "#00ff88");
+      p.setAttribute("stroke-width", "1");
+      p.setAttribute("stroke-opacity", "0.18");
+      layer.appendChild(p);
+      return { el: p, idx: i };
+    });
+
+    if (reduced) {
+      paths.forEach(({ el }) => { el.style.strokeDashoffset = 0; });
+      counter.textContent = `${mc.nPaths.toLocaleString()} / ${mc.nPaths.toLocaleString()} PATHS`;
+      ["#mc-band", "#mc-p05", "#mc-p95", "#mc-median"].forEach((sel) => $(sel).setAttribute("opacity", "1"));
+      figure.classList.remove("simulating");
+      if (onComplete) onComplete();
+      return;
+    }
+
+    const displayStep = mc.nPaths / paths.length;
+    let drawnCount = 0;
+    const perPath = Math.max(480, Math.min(720, 2400 / Math.max(paths.length, 1)));
+    const staggerMs = Math.max(8, Math.min(30, 1800 / Math.max(paths.length, 1)));
+
+    paths.forEach(({ el, idx }) => {
+      const len = el.getTotalLength();
+      el.style.strokeDasharray = len;
+      el.style.strokeDashoffset = len;
+      const anim = el.animate(
+        [{ strokeDashoffset: len }, { strokeDashoffset: 0 }],
+        { duration: perPath, delay: idx * staggerMs, easing: "cubic-bezier(0.16,1,0.3,1)", fill: "forwards" }
+      );
+      anim.onfinish = () => {
+        drawnCount++;
+        const shown = Math.min(mc.nPaths, Math.round(drawnCount * displayStep));
+        counter.textContent = `${shown.toLocaleString()} / ${mc.nPaths.toLocaleString()} PATHS`;
+        if (drawnCount === paths.length) {
+          const reveal = [
+            ["#mc-band", 0],
+            ["#mc-p05", 80],
+            ["#mc-p95", 120],
+            ["#mc-median", 180],
+          ];
+          reveal.forEach(([sel, d]) => {
+            const e = $(sel);
+            if (!e) return;
+            e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 420, delay: d, easing: "cubic-bezier(0.25,1,0.5,1)", fill: "forwards" });
+          });
+          setTimeout(() => {
+            figure.classList.remove("simulating");
+            if (onComplete) onComplete();
+          }, 620);
+          counter.textContent = `${mc.nPaths.toLocaleString()} PATHS · E[R] ${pctFmt(s.expectedReturn)}`;
+        }
+      };
+    });
+  };
+
+  figure.classList.add("simulating");
+  // Defer to next frame so DOM is settled before computing getTotalLength
+  requestAnimationFrame(drawPaths);
 }
 
 function escapeAttr(s) {
@@ -791,6 +949,18 @@ function renderSummary() {
   const agg = `${buy} BUY · ${uns} UNSURE · ${sell} SELL across ${all.length} starred stocks.`;
   $("#aggregate-signal").innerHTML = signalBadge(winner, { context: agg });
   $("#summary-signal").innerHTML = signalBadge(winner, { context: agg });
+
+  if (state.prevAggregateSignal && state.prevAggregateSignal !== winner && !prefersReducedMotion()) {
+    ["#aggregate-signal .badge", "#summary-signal .badge"].forEach((sel) => {
+      const b = $(sel);
+      if (!b) return;
+      b.animate(
+        [{ transform: "scale(0.92)" }, { transform: "scale(1.08)" }, { transform: "scale(1)" }],
+        { duration: 360, easing: "cubic-bezier(0.22,1,0.36,1)" }
+      );
+    });
+  }
+  state.prevAggregateSignal = winner;
 }
 
 // ========== Announce (live region) ==========
@@ -862,14 +1032,24 @@ function startLiveTicks() {
 function wireEvents() {
   // Run button
   $("#run-btn").addEventListener("click", () => {
+    const btn = $("#run-btn");
+    if (btn.classList.contains("running")) return;
+    btn.classList.add("running");
+    btn.setAttribute("aria-busy", "true");
+    const original = btn.textContent;
+    btn.textContent = "Simulating";
     announce(`Running ${state.sims.toLocaleString()} simulations for ${state.selectedTicker}…`);
-    // small delay so the status is perceived as a separate event
     setTimeout(() => {
       state.mcResult = null;
-      renderDetail();
-      const s = state.stocks.find((x) => x.ticker === state.selectedTicker);
-      const er = s ? pctFmt(state.mcResult.summary.expectedReturn) : "—";
-      announce(`Simulation complete for ${state.selectedTicker}. Expected return ${er}.`);
+      renderDetail(() => {
+        btn.classList.remove("running");
+        btn.removeAttribute("aria-busy");
+        btn.textContent = original;
+        const er = state.mcResult && state.mcResult.summary
+          ? pctFmt(state.mcResult.summary.expectedReturn)
+          : "—";
+        announce(`Simulation complete for ${state.selectedTicker}. Expected return ${er}.`);
+      });
     }, 30);
   });
 

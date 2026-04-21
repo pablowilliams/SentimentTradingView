@@ -847,3 +847,238 @@ figcaption {
   .kpi-value { font-size: 18px; }
   .brand-mark { font-size: 20px; }
 }
+
+/* =======================================================================
+   ANIMATION LAYER
+   ======================================================================= */
+:root {
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  body::before, body::after { animation: none !important; }
+  .live-dot, .brand-dot, .status-dot.pulse { animation: none !important; }
+}
+
+/* Base micro-transitions */
+.kpi, .rail-box, .strategy-chip, .btn, .badge,
+table.stocks tbody tr, .section, .post, .summary-card, .strategy-card {
+  transition:
+    background-color 160ms var(--ease-out-quart),
+    border-color 160ms var(--ease-out-quart),
+    color 160ms var(--ease-out-quart),
+    box-shadow 180ms var(--ease-out-quart),
+    transform 140ms var(--ease-out-quart);
+}
+.strategy-chip:hover { transform: translateY(-1px); }
+.btn:hover:not(:disabled) { transform: translateY(-1px); }
+table.stocks tbody tr:hover { box-shadow: inset 2px 0 0 var(--border-strong); }
+table.stocks tbody tr[aria-pressed="true"] { box-shadow: inset 2px 0 0 var(--accent), 0 0 0 1px rgba(0,255,136,0.15); }
+
+/* Entrance: stagger fade-up for the main grid elements */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideInLeft { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+
+.kpi-strip .kpi,
+.side-rail .rail-box,
+.summary-grid .summary-card {
+  animation: fadeUp 420ms var(--ease-out-quart) both;
+}
+.kpi-strip .kpi:nth-child(1) { animation-delay: 0ms; }
+.kpi-strip .kpi:nth-child(2) { animation-delay: 40ms; }
+.kpi-strip .kpi:nth-child(3) { animation-delay: 80ms; }
+.kpi-strip .kpi:nth-child(4) { animation-delay: 120ms; }
+.kpi-strip .kpi:nth-child(5) { animation-delay: 160ms; }
+.kpi-strip .kpi:nth-child(6) { animation-delay: 200ms; }
+
+.side-rail .rail-box:nth-child(1) { animation-delay: 60ms; }
+.side-rail .rail-box:nth-child(2) { animation-delay: 120ms; }
+.side-rail .rail-box:nth-child(3) { animation-delay: 180ms; }
+.side-rail .rail-box:nth-child(4) { animation-delay: 240ms; }
+.side-rail .rail-box:nth-child(5) { animation-delay: 300ms; }
+.side-rail .rail-box:nth-child(6) { animation-delay: 360ms; }
+
+.term-strip .kv { animation: slideInLeft 320ms var(--ease-out-quart) both; }
+.term-strip .kv:nth-child(1) { animation-delay: 0ms; }
+.term-strip .kv:nth-child(2) { animation-delay: 30ms; }
+.term-strip .kv:nth-child(3) { animation-delay: 60ms; }
+.term-strip .kv:nth-child(4) { animation-delay: 90ms; }
+.term-strip .kv:nth-child(5) { animation-delay: 120ms; }
+.term-strip .kv:nth-child(6) { animation-delay: 150ms; }
+.term-strip .kv:nth-child(7) { animation-delay: 180ms; }
+.term-strip .kv:nth-child(8) { animation-delay: 210ms; }
+
+/* Status dot pulse on active signal */
+@keyframes dotPulse {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50%      { transform: scale(1.25); filter: brightness(1.4); }
+}
+.status-dot { will-change: transform; }
+.status-dot.buy,
+.status-dot.sell { animation: dotPulse 2.4s var(--ease-out-quart) infinite; }
+
+/* Conviction bar fill-in stagger */
+.bar .cell { transform-origin: left center; }
+.bar .cell.on {
+  animation: cellFill 340ms var(--ease-out-expo) both;
+}
+.bar .cell.on:nth-child(1) { animation-delay: 0ms; }
+.bar .cell.on:nth-child(2) { animation-delay: 35ms; }
+.bar .cell.on:nth-child(3) { animation-delay: 70ms; }
+.bar .cell.on:nth-child(4) { animation-delay: 105ms; }
+.bar .cell.on:nth-child(5) { animation-delay: 140ms; }
+.bar .cell.on:nth-child(6) { animation-delay: 175ms; }
+.bar .cell.on:nth-child(7) { animation-delay: 210ms; }
+.bar .cell.on:nth-child(8) { animation-delay: 245ms; }
+@keyframes cellFill {
+  from { transform: scaleX(0.1); opacity: 0; filter: brightness(1.8); }
+  to   { transform: scaleX(1); opacity: 1; filter: brightness(1); }
+}
+
+/* Badge subtle pulse on update */
+@keyframes badgePop {
+  0%   { transform: scale(0.96); }
+  60%  { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.badge.pop { animation: badgePop 280ms var(--ease-out-quart); }
+
+/* Chart frame: scan-sweep + perimeter glow while simulating */
+.chart-wrap { position: relative; overflow: hidden; isolation: isolate; }
+.chart-wrap::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg,
+      transparent 0%,
+      rgba(0,255,136,0.00) 40%,
+      rgba(0,255,136,0.22) 50%,
+      rgba(0,255,136,0.00) 60%,
+      transparent 100%);
+  width: 30%;
+  transform: translateX(-120%);
+  opacity: 0;
+  transition: opacity 200ms var(--ease-out-quart);
+  z-index: 2;
+  mix-blend-mode: screen;
+}
+.chart-wrap.simulating::before {
+  opacity: 1;
+  animation: scanSweep 2.1s var(--ease-out-expo) infinite;
+}
+.chart-wrap.simulating {
+  box-shadow: 0 0 0 1px rgba(0,255,136,0.45), 0 0 24px -4px rgba(0,255,136,0.25) inset;
+}
+@keyframes scanSweep {
+  from { transform: translateX(-50%); }
+  to   { transform: translateX(430%); }
+}
+
+/* Grid dot background on chart */
+.chart-wrap::after {
+  content: "";
+  position: absolute;
+  inset: 12px 14px;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255,255,255,0.04) 1px, transparent 1px);
+  background-size: 20px 20px;
+  z-index: 0;
+  border-radius: 3px;
+}
+.chart-wrap > * { position: relative; z-index: 1; }
+
+/* Counter inside chart */
+#mc-counter {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  fill: var(--accent);
+  filter: drop-shadow(0 0 4px rgba(0,255,136,0.45));
+}
+
+/* Sentiment bars width transition */
+.sentiment-bars div { transition: width 450ms var(--ease-out-quart); }
+
+/* Sample path base */
+#paths-layer path {
+  mix-blend-mode: screen;
+}
+
+/* Run button loading state */
+.btn.running {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+  pointer-events: none;
+  padding-left: 38px;
+  position: relative;
+}
+.btn.running::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 6px; height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 10px 0 0 var(--accent-dim), 20px 0 0 rgba(0,255,136,0.15);
+  animation: dotsRun 900ms linear infinite;
+}
+@keyframes dotsRun {
+  0%   { box-shadow: 10px 0 0 var(--accent-dim), 20px 0 0 rgba(0,255,136,0.15); }
+  33%  { box-shadow: 10px 0 0 var(--accent),     20px 0 0 var(--accent-dim); }
+  66%  { box-shadow: 10px 0 0 rgba(0,255,136,0.15), 20px 0 0 var(--accent); }
+  100% { box-shadow: 10px 0 0 var(--accent-dim), 20px 0 0 rgba(0,255,136,0.15); }
+}
+
+/* Very subtle CRT flicker — a near-imperceptible luminance flutter */
+@keyframes crtFlicker {
+  0%, 97.5%, 100% { opacity: 0; }
+  98%             { opacity: 0.04; }
+  99%             { opacity: 0.02; }
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: #000;
+  pointer-events: none;
+  z-index: 999;
+  animation: crtFlicker 9s linear infinite;
+}
+
+/* KPI value changing — accent glow pulse when a new value lands */
+@keyframes valueLand {
+  0%   { text-shadow: 0 0 0 transparent; }
+  30%  { text-shadow: 0 0 12px currentColor; }
+  100% { text-shadow: 0 0 0 transparent; }
+}
+.kpi-value.landing,
+.rail-box-value.landing { animation: valueLand 420ms var(--ease-out-quart); }
+
+/* Row focus ring refinement */
+table.stocks tbody tr:focus-visible {
+  box-shadow: inset 2px 0 0 var(--accent), 0 0 0 1px var(--accent);
+}
+
+/* Strategy chip check-in */
+@keyframes chipCheck {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+.strategy-chip:has(input:checked) { animation: chipCheck 260ms var(--ease-out-quart); }
