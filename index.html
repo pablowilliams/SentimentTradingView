@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="dark" />
+<title>SentimentTradingView — Terminal</title>
+<meta name="description" content="Terminal-style Monte Carlo dashboard for TradingView-starred stocks, with strategy signals and X sentiment." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<a href="#main" class="skip-link">Skip to main content</a>
+
+<div class="app">
+
+  <!-- ===== Terminal top strip ===== -->
+  <div class="term-strip" role="status" aria-label="Session status">
+    <span class="kv"><span class="brand-dot" aria-hidden="true"></span><span>STV</span></span>
+    <span class="kv"><span>WATCH</span> <span class="v" id="term-watch">10</span></span>
+    <span class="kv ok"><span>LIVE</span> <span class="v" id="term-live">10</span></span>
+    <span class="kv"><span>HORIZON</span> <span class="v" id="term-horizon">30D</span></span>
+    <span class="kv"><span>PATHS</span> <span class="v" id="term-paths">1K</span></span>
+    <span class="kv"><span>SEED</span> <span class="v" id="term-seed">42</span></span>
+    <span class="kv"><span>LATENCY</span> <span class="v" id="term-latency">2MS</span></span>
+    <span class="kv ok"><span>UPTIME</span> <span class="v" id="term-uptime">00:00:00</span></span>
+  </div>
+
+  <!-- ===== Header ===== -->
+  <header class="app-header" role="banner">
+    <div>
+      <h1>SentimentTradingView // Terminal</h1>
+      <p class="subtitle">Monte Carlo dashboard for your TradingView-starred watchlist. Pick strategies, act on individual stocks, drill into any ticker.</p>
+    </div>
+    <div class="header-meta" aria-label="Data status">
+      <span><span class="live-dot" aria-hidden="true"></span>Live ticks</span>
+      <span>Last update: <time id="last-update" datetime="">—</time></span>
+    </div>
+  </header>
+
+  <main id="main" role="main" aria-labelledby="dashboard-title">
+    <h2 id="dashboard-title" class="sr-only">Portfolio dashboard</h2>
+
+    <!-- ===== Strategy + controls ===== -->
+    <section class="controls-block" aria-labelledby="controls-heading">
+      <h2 id="controls-heading" class="sr-only">Strategy and simulation controls</h2>
+
+      <div class="strategy-bar">
+        <fieldset class="strategy-fieldset">
+          <legend>Trading strategies <span class="legend-hint">pick one or more — signals combine</span></legend>
+          <div class="strategy-options" id="strategy-options"></div>
+        </fieldset>
+      </div>
+
+      <div class="controls-row">
+        <div class="field">
+          <label for="ticker-select">Focus ticker</label>
+          <select id="ticker-select" aria-describedby="ticker-help"></select>
+          <span id="ticker-help" class="sr-only">Select a starred TradingView ticker to drill into.</span>
+        </div>
+        <div class="field">
+          <label for="sims-range">Simulations <span id="sims-value" class="range-value" aria-hidden="true">1000</span></label>
+          <div class="range-row">
+            <input type="range" id="sims-range" min="100" max="10000" step="100" value="1000" aria-valuetext="1000 simulation paths" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="horizon-select">Horizon</label>
+          <select id="horizon-select">
+            <option value="5">5 trading days</option>
+            <option value="30" selected>30 trading days</option>
+            <option value="90">90 trading days</option>
+            <option value="252">252 trading days</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="seed-input">Random seed</label>
+          <select id="seed-input">
+            <option value="42" selected>42 (deterministic)</option>
+            <option value="1337">1337</option>
+            <option value="2025">2025</option>
+            <option value="random">random</option>
+          </select>
+        </div>
+        <button type="button" id="run-btn" class="btn">Run Sim</button>
+      </div>
+
+      <span id="live-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <p id="status-line" class="status-line" aria-hidden="true">Ready. Select strategies and a ticker, then run a simulation.</p>
+    </section>
+
+    <!-- ===== Main grid: content + right rail ===== -->
+    <div class="main-grid">
+
+      <div class="main-col">
+
+        <!-- ===== Portfolio KPIs ===== -->
+        <section aria-labelledby="perf-heading">
+          <div class="section-header tight">
+            <h2 id="perf-heading">Portfolio performance</h2>
+            <span class="subtext">Equal-weight — all starred stocks</span>
+          </div>
+          <div class="kpi-strip" id="kpi-strip"></div>
+        </section>
+
+        <!-- ===== Individual stocks ===== -->
+        <section class="section" aria-labelledby="stocks-heading">
+          <div class="section-header">
+            <div>
+              <h2 id="stocks-heading">Individual stocks // starred</h2>
+              <p class="subtext">Every ticker pulled from your TradingView starred watchlist. Action column = combined signal from your selected strategies. Click a row to drill down.</p>
+            </div>
+            <span id="aggregate-signal" aria-live="polite"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="stocks" id="stocks-table">
+              <caption class="sr-only">Starred TradingView stocks with live price, change, expected Monte Carlo return, strategy action and sentiment.</caption>
+              <thead>
+                <tr>
+                  <th scope="col" aria-sort="none"><button type="button" data-sort="ticker">Ticker <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
+                  <th scope="col">Name</th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="price">Price <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="change">Chg% <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="expRet">MC E[R] <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
+                  <th scope="col" class="num">95% CI</th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="sentiment">Sent</button></th>
+                  <th scope="col">Conviction</th>
+                  <th scope="col">Action</th>
+                </tr>
+              </thead>
+              <tbody id="stocks-body"></tbody>
+            </table>
+          </div>
+          <p class="table-help subtext" id="table-help">Tip: click any row or press Enter on a focused row to select that ticker.</p>
+        </section>
+
+        <!-- ===== Detail for selected ticker ===== -->
+        <section class="section" aria-labelledby="detail-heading" id="detail-section">
+          <div class="section-header">
+            <div>
+              <h2 id="detail-heading">Detail // <span id="detail-ticker">—</span> <span id="detail-name" class="subtext"></span></h2>
+              <p class="subtext" id="detail-subtitle">Click a row in the table above to drill into a specific stock.</p>
+            </div>
+            <span id="detail-signal" aria-live="polite"></span>
+          </div>
+
+          <div class="grid-2">
+            <figure class="chart-wrap" aria-labelledby="mc-heading">
+              <h3 id="mc-heading">Monte Carlo price paths</h3>
+              <div id="mc-chart" role="img" aria-label="Loading chart"></div>
+              <figcaption id="mc-caption">Run a simulation to see projected price paths.</figcaption>
+              <table class="sr-only" id="mc-data-table" aria-label="Monte Carlo summary statistics">
+                <caption>Simulation summary</caption>
+                <thead><tr><th scope="col">Statistic</th><th scope="col">Value</th></tr></thead>
+                <tbody id="mc-data-body"></tbody>
+              </table>
+            </figure>
+
+            <div class="sentiment-wrap" aria-labelledby="sentiment-heading">
+              <h3 id="sentiment-heading">X sentiment</h3>
+
+              <div class="sentiment-bars" role="img" aria-label="Sentiment distribution" id="sentiment-bars-wrap">
+                <div class="sentiment-bar-pos" id="sent-bar-pos" style="width: 0%"></div>
+                <div class="sentiment-bar-neu" id="sent-bar-neu" style="width: 0%"></div>
+                <div class="sentiment-bar-neg" id="sent-bar-neg" style="width: 0%"></div>
+              </div>
+
+              <div class="sentiment-stats" aria-label="Sentiment breakdown">
+                <div class="sentiment-stat">
+                  <div class="sentiment-stat-label" id="sent-pos-lbl">Positive</div>
+                  <div class="sentiment-stat-value delta-up" id="sent-pos-val" aria-labelledby="sent-pos-lbl">—</div>
+                </div>
+                <div class="sentiment-stat">
+                  <div class="sentiment-stat-label" id="sent-neu-lbl">Neutral</div>
+                  <div class="sentiment-stat-value" id="sent-neu-val" aria-labelledby="sent-neu-lbl">—</div>
+                </div>
+                <div class="sentiment-stat">
+                  <div class="sentiment-stat-label" id="sent-neg-lbl">Negative</div>
+                  <div class="sentiment-stat-value delta-down" id="sent-neg-val" aria-labelledby="sent-neg-lbl">—</div>
+                </div>
+              </div>
+
+              <h4 id="recent-posts">Recent posts</h4>
+              <ul class="posts" id="post-list" aria-labelledby="recent-posts"></ul>
+            </div>
+          </div>
+
+          <div>
+            <h3 id="strategy-breakdown-heading">Per-strategy signals // <span id="detail-ticker-2">—</span></h3>
+            <div class="strategy-grid" id="strategy-grid" aria-labelledby="strategy-breakdown-heading"></div>
+          </div>
+        </section>
+
+        <!-- ===== Summary ===== -->
+        <section class="section" aria-labelledby="summary-heading">
+          <div class="section-header">
+            <div>
+              <h2 id="summary-heading">Starred watchlist // summary</h2>
+              <p class="subtext" id="summary-subtitle">Narrative overview of every starred stock with combined signal and sentiment.</p>
+            </div>
+            <span id="summary-signal"></span>
+          </div>
+          <div class="summary-grid" id="summary-grid"></div>
+        </section>
+
+      </div>
+
+      <!-- ===== Right rail ===== -->
+      <aside class="side-rail" aria-label="Key session metrics">
+        <div class="rail-box" id="rail-winrate">
+          <p class="rail-box-label">Win rate</p>
+          <p class="rail-box-value up" id="rail-winrate-val">—</p>
+          <p class="rail-box-sub" id="rail-winrate-sub">Pr(MC final &gt; entry)</p>
+        </div>
+        <div class="rail-box" id="rail-sharpe">
+          <p class="rail-box-label">Sharpe</p>
+          <p class="rail-box-value" id="rail-sharpe-val">—</p>
+          <p class="rail-box-sub">Ex-ante, rf 4.5%</p>
+        </div>
+        <div class="rail-box" id="rail-er">
+          <p class="rail-box-label">E[R]</p>
+          <p class="rail-box-value" id="rail-er-val">—</p>
+          <p class="rail-box-sub" id="rail-er-sub">Portfolio, 30d</p>
+        </div>
+        <div class="rail-box down" id="rail-var">
+          <p class="rail-box-label">VaR 95%</p>
+          <p class="rail-box-value down" id="rail-var-val">—</p>
+          <p class="rail-box-sub">5th-percentile outcome</p>
+        </div>
+        <div class="rail-box" id="rail-sent">
+          <p class="rail-box-label">Crowd score</p>
+          <p class="rail-box-value" id="rail-sent-val">—</p>
+          <p class="rail-box-sub">X net pos − neg</p>
+        </div>
+        <div class="rail-box" id="rail-buys">
+          <p class="rail-box-label">Buys/Sells</p>
+          <p class="rail-box-value" id="rail-buys-val">—</p>
+          <p class="rail-box-sub" id="rail-buys-sub">Starred stocks</p>
+        </div>
+      </aside>
+
+    </div>
+
+  </main>
+
+  <footer class="app-footer" role="contentinfo">
+    <span>MC engine: Geometric Brownian Motion // Sentiment: X API v2 (simulated) // WCAG 2.2 AA</span>
+    <span class="brand-mark">STV<span class="dot">.</span></span>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
