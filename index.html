@@ -15,7 +15,26 @@
 
 <a href="#main" class="skip-link">Skip to main content</a>
 
+<!-- ===== Boot overlay ===== -->
+<div id="boot-overlay" class="boot-overlay" role="dialog" aria-modal="true" aria-labelledby="boot-title" hidden>
+  <div class="boot-inner">
+    <button type="button" id="boot-skip" class="boot-skip">Skip intro</button>
+    <h2 id="boot-title" class="sr-only">Terminal boot sequence</h2>
+    <pre id="boot-log" class="boot-log" aria-live="polite" aria-atomic="false"></pre>
+    <p class="boot-hint sr-only">Press Escape to skip the boot animation.</p>
+  </div>
+</div>
+
 <div class="app">
+
+  <!-- ===== Live ticker tape ===== -->
+  <div class="ticker-tape-wrap" role="region" aria-label="Live price ticker tape">
+    <button type="button" id="tape-toggle" class="tape-toggle" aria-pressed="false" aria-label="Pause ticker tape"><span aria-hidden="true" class="tape-icon">❚❚</span><span class="tape-toggle-lbl">Pause</span></button>
+    <div class="ticker-tape-viewport">
+      <div class="ticker-tape" id="ticker-tape" aria-hidden="true"></div>
+    </div>
+    <div id="ticker-tape-sr" class="sr-only" aria-live="off"></div>
+  </div>
 
   <!-- ===== Terminal top strip ===== -->
   <div class="term-strip" role="status" aria-label="Session status">
@@ -106,6 +125,15 @@
           <div class="kpi-strip" id="kpi-strip"></div>
         </section>
 
+        <!-- ===== Sector heatmap ===== -->
+        <section aria-labelledby="heatmap-heading" class="heatmap-section">
+          <div class="section-header tight">
+            <h2 id="heatmap-heading">Watchlist heatmap</h2>
+            <span class="subtext">Tile color = today change · size = portfolio weight</span>
+          </div>
+          <div class="heatmap" id="heatmap" role="list" aria-label="Watchlist heatmap by today's change"></div>
+        </section>
+
         <!-- ===== Individual stocks ===== -->
         <section class="section" aria-labelledby="stocks-heading">
           <div class="section-header">
@@ -122,11 +150,13 @@
                 <tr>
                   <th scope="col" aria-sort="none"><button type="button" data-sort="ticker">Ticker <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
                   <th scope="col">Name</th>
+                  <th scope="col" class="spark-col">60D</th>
                   <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="price">Price <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
                   <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="change">Chg% <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
                   <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="expRet">MC E[R] <span class="sort-ind" aria-hidden="true">⇅</span></button></th>
                   <th scope="col" class="num">95% CI</th>
                   <th scope="col" class="num" aria-sort="none"><button type="button" data-sort="sentiment">Sent</button></th>
+                  <th scope="col">Pressure</th>
                   <th scope="col">Conviction</th>
                   <th scope="col">Action</th>
                 </tr>
@@ -150,7 +180,9 @@
           <div class="grid-2">
             <figure class="chart-wrap" aria-labelledby="mc-heading">
               <h3 id="mc-heading">Monte Carlo price paths</h3>
-              <div id="mc-chart" role="img" aria-label="Loading chart"></div>
+              <div id="mc-chart" role="img" aria-label="Loading chart" tabindex="0" aria-describedby="mc-crosshair-help"></div>
+              <p id="mc-crosshair-help" class="sr-only">Use left and right arrow keys to move the crosshair across trading days; press Home or End to jump to first or last day.</p>
+              <div id="mc-crosshair-sr" class="sr-only" aria-live="polite" aria-atomic="true"></div>
               <figcaption id="mc-caption">Run a simulation to see projected price paths.</figcaption>
               <table class="sr-only" id="mc-data-table" aria-label="Monte Carlo summary statistics">
                 <caption>Simulation summary</caption>
@@ -215,20 +247,38 @@
           <p class="rail-box-value up" id="rail-winrate-val">—</p>
           <p class="rail-box-sub" id="rail-winrate-sub">Pr(MC final &gt; entry)</p>
         </div>
-        <div class="rail-box" id="rail-sharpe">
+        <div class="rail-box gauge-box" id="rail-sharpe">
           <p class="rail-box-label">Sharpe</p>
+          <div class="gauge-wrap" id="gauge-sharpe" role="img" aria-label="Sharpe gauge">
+            <svg class="gauge" viewBox="0 0 120 68" aria-hidden="true">
+              <path class="gauge-track" d="M10,60 A50,50 0 0,1 110,60"/>
+              <path class="gauge-fill" id="gauge-sharpe-arc" d="M10,60 A50,50 0 0,1 110,60"/>
+              <line class="gauge-needle" id="gauge-sharpe-needle" x1="60" y1="60" x2="60" y2="16"/>
+              <circle class="gauge-hub" cx="60" cy="60" r="4"/>
+              <line class="gauge-tick" x1="60" y1="14" x2="60" y2="10" stroke-width="2"/>
+            </svg>
+          </div>
           <p class="rail-box-value" id="rail-sharpe-val">—</p>
-          <p class="rail-box-sub">Ex-ante, rf 4.5%</p>
+          <p class="rail-box-sub" id="rail-sharpe-sub">Ex-ante · rf 4.5%</p>
         </div>
         <div class="rail-box" id="rail-er">
           <p class="rail-box-label">E[R]</p>
           <p class="rail-box-value" id="rail-er-val">—</p>
           <p class="rail-box-sub" id="rail-er-sub">Portfolio, 30d</p>
         </div>
-        <div class="rail-box down" id="rail-var">
+        <div class="rail-box down gauge-box" id="rail-var">
           <p class="rail-box-label">VaR 95%</p>
+          <div class="gauge-wrap" id="gauge-var" role="img" aria-label="VaR gauge">
+            <svg class="gauge" viewBox="0 0 120 68" aria-hidden="true">
+              <path class="gauge-track" d="M10,60 A50,50 0 0,1 110,60"/>
+              <path class="gauge-fill danger" id="gauge-var-arc" d="M10,60 A50,50 0 0,1 110,60"/>
+              <line class="gauge-needle danger" id="gauge-var-needle" x1="60" y1="60" x2="60" y2="16"/>
+              <circle class="gauge-hub" cx="60" cy="60" r="4"/>
+              <line class="gauge-tick" x1="60" y1="14" x2="60" y2="10" stroke-width="2"/>
+            </svg>
+          </div>
           <p class="rail-box-value down" id="rail-var-val">—</p>
-          <p class="rail-box-sub">5th-percentile outcome</p>
+          <p class="rail-box-sub" id="rail-var-sub">5th-percentile outcome</p>
         </div>
         <div class="rail-box" id="rail-sent">
           <p class="rail-box-label">Crowd score</p>
@@ -245,6 +295,23 @@
     </div>
 
   </main>
+
+  <!-- Particle effects layer -->
+  <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
+
+  <!-- SVG gradient defs for sparklines -->
+  <svg aria-hidden="true" focusable="false" width="0" height="0" style="position:absolute">
+    <defs>
+      <linearGradient id="spark-grad-up" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"  stop-color="#00ff88" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#00ff88" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="spark-grad-down" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"  stop-color="#ff3366" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#ff3366" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+  </svg>
 
   <footer class="app-footer" role="contentinfo">
     <span>MC engine: Geometric Brownian Motion // Sentiment: X API v2 (simulated) // WCAG 2.2 AA</span>

@@ -601,15 +601,20 @@ function renderStocksTable() {
     const sentScore = pctFmt(s.sentiment.score, 0);
     const dotCls = s.combinedSignal.signal === "BUY" ? "buy" : s.combinedSignal.signal === "SELL" ? "sell" : "unsure";
     const conviction = convictionFromStock(s);
+    const spark = sparklineSvg(s.history, s.change >= 0);
+    const spark60 = pctFmt((s.history[s.history.length - 1] - s.history[0]) / s.history[0]);
+    const press = pressureFromStock(s);
     return `
-      <tr tabindex="0" role="button" aria-pressed="${selected}" aria-selected="${selected}" data-ticker="${s.ticker}" aria-label="${s.ticker}, ${s.name}. Price ${priceFmt(s.price)}, change ${pctFmt(s.change)}. Action ${s.combinedSignal.signal}, conviction ${conviction.score} of 8.">
-        <td class="ticker"><span class="status-dot ${dotCls}" aria-hidden="true"></span>${s.ticker}</td>
+      <tr tabindex="0" role="button" aria-pressed="${selected}" aria-selected="${selected}" data-ticker="${s.ticker}" aria-label="${s.ticker}, ${s.name}. Price ${priceFmt(s.price)}, change ${pctFmt(s.change)}. 60-day trend ${spark60}. Buy pressure ${press.buyPct}%, sell pressure ${press.sellPct}%. Action ${s.combinedSignal.signal}, conviction ${conviction.score} of 8.">
+        <td class="ticker"><span class="status-dot ${dotCls}" aria-hidden="true"></span><span class="ticker-text" data-text="${s.ticker}">${s.ticker}</span></td>
         <td class="name">${s.name}</td>
+        <td class="spark-cell">${spark}</td>
         <td class="num">${priceFmt(s.price)}</td>
         <td class="num">${deltaLabel(s.change)}</td>
         <td class="num ${s.mcSummary.expectedReturn >= 0 ? "delta-up" : "delta-down"}">${pctFmt(s.mcSummary.expectedReturn)}</td>
         <td class="num">${ciLabel}</td>
         <td class="num">${sentDom} ${sentScore}</td>
+        <td class="pressure-cell">${pressureBar(press)}</td>
         <td>${convictionBar(conviction)}</td>
         <td>${signalBadge(s.combinedSignal.signal, { context: s.combinedSignal.detail })}</td>
       </tr>
@@ -628,7 +633,7 @@ function renderStocksTable() {
     Object.entries(priceChanges).forEach(([ticker, dir]) => {
       const row = body.querySelector(`tr[data-ticker="${ticker}"]`);
       if (!row) return;
-      const priceCell = row.children[2];
+      const priceCell = row.children[3];
       if (!priceCell) return;
       const color = dir === "up" ? "rgba(0,255,136,0.28)" : "rgba(255,51,102,0.28)";
       const text  = dir === "up" ? "#00ff88" : "#ff3366";
@@ -640,20 +645,20 @@ function renderStocksTable() {
         { duration: 720, easing: "cubic-bezier(0.22,1,0.36,1)", fill: "none" }
       );
     });
-    // Pop action-badge when the combined signal flips
+    // Pop action-badge + glitch ticker + particle burst when signal flips
     Object.keys(signalChanges).forEach((ticker) => {
       const row = body.querySelector(`tr[data-ticker="${ticker}"]`);
       if (!row) return;
       const badge = row.querySelector(".badge");
-      if (!badge) return;
-      badge.animate(
-        [
-          { transform: "scale(0.94)" },
-          { transform: "scale(1.06)" },
-          { transform: "scale(1)" },
-        ],
-        { duration: 320, easing: "cubic-bezier(0.25,1,0.5,1)" }
-      );
+      if (badge) {
+        badge.animate(
+          [{ transform: "scale(0.94)" }, { transform: "scale(1.06)" }, { transform: "scale(1)" }],
+          { duration: 320, easing: "cubic-bezier(0.25,1,0.5,1)" }
+        );
+      }
+      triggerGlitch(row);
+      const newSignal = state.prevSignals[ticker];
+      particlesForSignalFlip(row, newSignal);
     });
   }
 }
@@ -864,6 +869,9 @@ function renderChart(mc, stock, onComplete) {
   figure.classList.add("simulating");
   // Defer to next frame so DOM is settled before computing getTotalLength
   requestAnimationFrame(drawPaths);
+
+  // Wire crosshair (feature 10)
+  wireChartCrosshair(mc, { xScale, yScale, padL, padT, innerH });
 }
 
 function escapeAttr(s) {
@@ -975,6 +983,9 @@ function announce(msg) {
 
 function renderAll() {
   renderKPIs();
+  renderGauges();
+  renderHeatmap();
+  renderTickerTape();
   renderStocksTable();
   renderDetail();
   renderSummary();
@@ -1135,6 +1146,385 @@ function selectTickerFromRow(ticker) {
   $("#detail-section").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+// =======================================================================
+// ===== VISUAL IMPACT LAYER (10 enhancements) ===========================
+// =======================================================================
+
+// --- Sparkline (feature 2) -------------------------------------------
+function sparklineSvg(history, upBias) {
+  const w = 80, h = 22;
+  const vals = history.slice(-60);
+  if (!vals.length) return "";
+  let lo = Infinity, hi = -Infinity;
+  for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const range = (hi - lo) || 1;
+  const dir = vals[vals.length - 1] >= vals[0] ? "up" : "down";
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * w;
+    const y = h - ((v - lo) / range) * h;
+    return [x, y];
+  });
+  const lineD = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const areaD = lineD + ` L${w},${h} L0,${h} Z`;
+  const first = vals[0].toFixed(2), last = vals[vals.length - 1].toFixed(2);
+  const pct = (((vals[vals.length - 1] - vals[0]) / vals[0]) * 100).toFixed(1);
+  const label = `60-day trend ${dir}, ${pct}% (from $${first} to $${last})`;
+  return `<svg class="sparkline ${dir}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${label}"><path class="area" d="${areaD}"/><path class="line" d="${lineD}"/><circle class="dot" cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="1.6"/></svg>`;
+}
+
+// --- Pressure bar (feature 9) ----------------------------------------
+function pressureFromStock(s) {
+  const buy = Math.max(0, Math.min(1, 0.5 + 0.35 * (s.mcSummary.probUp - 0.5) * 2 + 0.25 * s.sentiment.score));
+  const sell = 1 - buy;
+  return { buy, sell, buyPct: Math.round(buy * 100), sellPct: Math.round(sell * 100) };
+}
+function pressureBar(p) {
+  const buyW = (p.buy * 50).toFixed(1);
+  const sellW = (p.sell * 50).toFixed(1);
+  return `
+    <div class="pressure" role="img" aria-label="Buy pressure ${p.buyPct}%, sell pressure ${p.sellPct}%">
+      <div class="pressure-bar" aria-hidden="true">
+        <div class="pressure-fill sell" style="width: ${sellW}%"></div>
+        <div class="pressure-fill buy"  style="width: ${buyW}%"></div>
+      </div>
+      <span class="pressure-num" aria-hidden="true">${p.buyPct}/${p.sellPct}</span>
+    </div>`;
+}
+
+// --- Heatmap (feature 3) ---------------------------------------------
+function renderHeatmap() {
+  const grid = $("#heatmap");
+  if (!grid) return;
+  const prev = state.prevHeatPct || {};
+  grid.innerHTML = state.stocks.map((s) => {
+    const pct = s.change;
+    const pctStr = pctFmt(pct);
+    const cls = pct > 0.001 ? "up" : pct < -0.001 ? "down" : "flat";
+    const alpha = Math.min(0.55, Math.abs(pct) * 6).toFixed(3);
+    const color = pct >= 0 ? "rgba(0,255,136,1)" : "rgba(255,51,102,1)";
+    const arrow = pct > 0 ? "▲" : pct < 0 ? "▼" : "—";
+    return `
+      <a class="heat-tile ${cls}" role="listitem" href="#detail-section" data-ticker="${s.ticker}"
+         style="--heat-color:${color}; --heat-alpha:${alpha};"
+         aria-label="${s.ticker} ${s.name}, today ${pctStr}, price ${priceFmt(s.price)}. Click to select.">
+        <span class="ht-sym">${s.ticker}</span>
+        <span class="ht-pct"><span aria-hidden="true">${arrow}</span>${pctStr}</span>
+        <span class="ht-sub">${priceFmt(s.price)} · ${s.sector.split(" ")[0]}</span>
+      </a>`;
+  }).join("");
+
+  // Ripple if changed since last render
+  if (!prefersReducedMotion()) {
+    grid.querySelectorAll(".heat-tile").forEach((tile) => {
+      const t = tile.dataset.ticker;
+      const p = state.stocks.find((x) => x.ticker === t).change;
+      if (prev[t] != null && Math.abs(prev[t] - p) > 1e-6) {
+        tile.classList.add("ripple");
+        setTimeout(() => tile.classList.remove("ripple"), 600);
+      }
+    });
+  }
+  state.prevHeatPct = Object.fromEntries(state.stocks.map((s) => [s.ticker, s.change]));
+
+  // Click to select
+  grid.querySelectorAll(".heat-tile").forEach((tile) => {
+    tile.addEventListener("click", (e) => {
+      e.preventDefault();
+      selectTickerFromRow(tile.dataset.ticker);
+    });
+  });
+}
+
+// --- Ticker tape (feature 1) -----------------------------------------
+let tapeBuilt = false;
+function renderTickerTape() {
+  const tape = $("#ticker-tape");
+  if (!tape) return;
+  const items = state.stocks.map((s) => {
+    const dir = s.change > 0.0005 ? "up" : s.change < -0.0005 ? "down" : "flat";
+    return `<span class="tape-item"><span class="sym">${s.ticker}</span><span class="px">${priceFmt(s.price)}</span><span class="dlt ${dir}">${pctFmt(s.change)}</span></span>`;
+  }).join('<span class="tape-sep" aria-hidden="true">·</span>');
+  // Duplicate for seamless loop
+  tape.innerHTML = items + '<span class="tape-sep" aria-hidden="true">·</span>' + items;
+  if (!tapeBuilt) {
+    const btn = $("#tape-toggle");
+    btn.addEventListener("click", () => {
+      const wrap = btn.closest(".ticker-tape-wrap");
+      const paused = wrap.classList.toggle("paused");
+      btn.setAttribute("aria-pressed", String(paused));
+      btn.setAttribute("aria-label", paused ? "Resume ticker tape" : "Pause ticker tape");
+      btn.querySelector(".tape-toggle-lbl").textContent = paused ? "Play" : "Pause";
+    });
+    tapeBuilt = true;
+  }
+}
+
+// --- Glitch on signal flip (feature 4) -------------------------------
+function triggerGlitch(row) {
+  if (prefersReducedMotion()) return;
+  const el = row.querySelector(".ticker-text");
+  if (!el) return;
+  el.classList.remove("glitch");
+  void el.offsetWidth;
+  el.classList.add("glitch");
+  setTimeout(() => el.classList.remove("glitch"), 400);
+}
+
+// --- 3D KPI tilt (feature 5) -----------------------------------------
+function wireKpiTilt() {
+  const reduced = prefersReducedMotion();
+  if (reduced) return;
+  const strip = $("#kpi-strip");
+  if (!strip) return;
+  strip.addEventListener("pointermove", (e) => {
+    const card = e.target.closest(".kpi");
+    if (!card) return;
+    const rect = card.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width;
+    const py = (e.clientY - rect.top)  / rect.height;
+    const rx = (0.5 - py) * 8;
+    const ry = (px - 0.5) * 8;
+    card.style.transform = `perspective(800px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg) translateZ(0)`;
+    card.style.setProperty("--tx", (px * 100).toFixed(1) + "%");
+    card.style.setProperty("--ty", (py * 100).toFixed(1) + "%");
+  });
+  strip.addEventListener("pointerleave", () => {
+    strip.querySelectorAll(".kpi").forEach((c) => { c.style.transform = ""; });
+  }, true);
+  strip.addEventListener("focusin", (e) => {
+    const card = e.target.closest(".kpi");
+    if (card) card.style.transform = "";
+  });
+}
+
+// --- Particle burst (feature 6) --------------------------------------
+function spawnParticles(origin, kind) {
+  if (prefersReducedMotion()) return;
+  const layer = $("#fx-layer");
+  if (!layer) return;
+  const count = kind === "BUY" ? 18 : 14;
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement("div");
+    p.className = "fx-particle" + (kind === "SELL" ? " sell" : "");
+    p.style.left = origin.x + "px";
+    p.style.top = origin.y + "px";
+    layer.appendChild(p);
+    const angle = kind === "BUY"
+      ? (Math.random() * Math.PI * 2)
+      : (Math.PI / 2 + (Math.random() - 0.5) * 0.7);
+    const speed = kind === "BUY" ? 40 + Math.random() * 80 : 20 + Math.random() * 40;
+    const dx = Math.cos(angle) * speed;
+    const dy = Math.sin(angle) * speed + (kind === "SELL" ? 70 + Math.random() * 40 : 0);
+    const dur = 620 + Math.random() * 380;
+    const rot = (Math.random() - 0.5) * 200;
+    p.animate(
+      [
+        { transform: "translate(-50%, -50%) rotate(0)", opacity: 1 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) rotate(${rot}deg)`, opacity: 0 },
+      ],
+      { duration: dur, easing: "cubic-bezier(0.22,1,0.36,1)", fill: "forwards" }
+    ).onfinish = () => p.remove();
+  }
+}
+function particlesForSignalFlip(row, signal) {
+  if (signal !== "BUY" && signal !== "SELL") return;
+  const badge = row.querySelector(".badge");
+  if (!badge) return;
+  const r = badge.getBoundingClientRect();
+  spawnParticles({ x: r.left + r.width / 2, y: r.top + r.height / 2 }, signal);
+}
+
+// --- Gauges (feature 7) ----------------------------------------------
+const GAUGE_ARC_LEN = 158; // approx arc length for viewBox 120x68 r=50
+function setGauge(arcEl, needleEl, ratio, statusLabelEl, value, fmt, thresholds) {
+  const r = Math.max(0, Math.min(1, ratio));
+  if (arcEl) arcEl.style.strokeDashoffset = String(GAUGE_ARC_LEN * (1 - r));
+  if (needleEl) {
+    const deg = -90 + r * 180;
+    needleEl.style.transform = `rotate(${deg}deg)`;
+  }
+  if (statusLabelEl && thresholds) {
+    let status = thresholds.find((t) => value <= t.max)?.label || thresholds[thresholds.length - 1].label;
+    statusLabelEl.textContent = status;
+  }
+}
+function renderGauges() {
+  const k = state.portfolio;
+  // Sharpe: map [-1, 3] -> [0, 1]
+  const sharpeRatio = Math.max(0, Math.min(1, (k.sharpe + 1) / 4));
+  const sharpeStatus =
+    k.sharpe >= 1.5 ? "excellent" :
+    k.sharpe >= 0.8 ? "good" :
+    k.sharpe >= 0.3 ? "moderate" :
+    k.sharpe >= 0   ? "weak" : "negative";
+  setGauge($("#gauge-sharpe-arc"), $("#gauge-sharpe-needle"), sharpeRatio);
+  $("#gauge-sharpe").setAttribute("aria-label", `Sharpe ${k.sharpe.toFixed(2)}, ${sharpeStatus} (target > 1.0)`);
+  setText("#rail-sharpe-sub", `Ex-ante · ${sharpeStatus}`);
+
+  // VaR: more negative = worse. map [-0.30, 0] -> [1, 0] (more red = fuller arc)
+  const varRatio = Math.max(0, Math.min(1, -k.var95 / 0.30));
+  const varStatus =
+    k.var95 >= -0.05 ? "low risk" :
+    k.var95 >= -0.12 ? "moderate risk" :
+    k.var95 >= -0.20 ? "elevated risk" : "severe risk";
+  setGauge($("#gauge-var-arc"), $("#gauge-var-needle"), varRatio);
+  $("#gauge-var").setAttribute("aria-label", `Value at Risk 95 percent, ${pctFmt(k.var95)}, ${varStatus}`);
+  setText("#rail-var-sub", `5th pct · ${varStatus}`);
+}
+
+// --- Boot sequence (feature 8) ---------------------------------------
+function runBootSequence(onComplete) {
+  const overlay = $("#boot-overlay");
+  if (!overlay) { onComplete(); return; }
+  const alreadySeen = sessionStorage.getItem("stv.booted") === "1";
+  if (alreadySeen || prefersReducedMotion()) {
+    overlay.hidden = true;
+    onComplete();
+    return;
+  }
+  overlay.hidden = false;
+  const log = $("#boot-log");
+  const skipBtn = $("#boot-skip");
+  let cancelled = false;
+  let timers = [];
+
+  const finish = () => {
+    if (cancelled) return;
+    cancelled = true;
+    timers.forEach(clearTimeout);
+    sessionStorage.setItem("stv.booted", "1");
+    overlay.classList.add("fadeout");
+    setTimeout(() => { overlay.hidden = true; onComplete(); }, 440);
+  };
+
+  skipBtn.addEventListener("click", finish, { once: true });
+  const escHandler = (e) => { if (e.key === "Escape") { finish(); document.removeEventListener("keydown", escHandler); } };
+  document.addEventListener("keydown", escHandler);
+  skipBtn.focus();
+
+  const lines = [
+    "> STV-TERMINAL v4.7  (c) sentiment-trading-view",
+    "> booting kernel ........................ <span class='ok'>OK</span>",
+    "> mounting tradingview watchlist ......... <span class='ok'>OK</span>",
+    `> loading ${STARRED.length} starred tickers .............. <span class='ok'>OK</span>`,
+    "> initializing monte carlo engine (GBM) .. <span class='ok'>OK</span>",
+    "> hooking X sentiment stream ............. <span class='ok'>OK</span>",
+    "> warming strategy voters ................ <span class='ok'>OK</span>",
+    "> session ready. <span class='cursor'></span>",
+  ];
+  let out = "";
+  const typeLine = (i) => {
+    if (cancelled) return;
+    if (i >= lines.length) { timers.push(setTimeout(finish, 420)); return; }
+    const line = lines[i];
+    let j = 0;
+    const step = () => {
+      if (cancelled) return;
+      // fast type, respecting tag boundaries
+      const next = line.indexOf("<", j);
+      if (next === -1) {
+        out += line.slice(j);
+        j = line.length;
+      } else if (next > j) {
+        out += line[j];
+        j++;
+      } else {
+        const close = line.indexOf(">", j);
+        out += line.slice(j, close + 1);
+        j = close + 1;
+      }
+      log.innerHTML = out;
+      if (j < line.length) timers.push(setTimeout(step, 12));
+      else { out += "\n"; log.innerHTML = out; timers.push(setTimeout(() => typeLine(i + 1), 90)); }
+    };
+    step();
+  };
+  typeLine(0);
+}
+
+// --- Chart crosshair (feature 10) ------------------------------------
+function wireChartCrosshair(mc, chartMeta) {
+  const chart = $("#mc-chart");
+  const svg = chart && chart.querySelector("svg");
+  if (!svg) return;
+  const readout = $("#mc-crosshair-sr");
+  const { xScale, yScale, padL, padT, innerH } = chartMeta;
+  const days = mc.days;
+
+  // remove any prior crosshair
+  svg.querySelectorAll(".crosshair-group").forEach((g) => g.remove());
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "crosshair-group");
+  const line = document.createElementNS(SVG_NS, "line");
+  line.setAttribute("class", "crosshair-line");
+  line.setAttribute("y1", String(padT));
+  line.setAttribute("y2", String(padT + innerH));
+  const dotMed = document.createElementNS(SVG_NS, "circle");
+  dotMed.setAttribute("class", "crosshair-dot");
+  dotMed.setAttribute("r", "3");
+  const lblBg = document.createElementNS(SVG_NS, "rect");
+  lblBg.setAttribute("class", "crosshair-label-bg");
+  lblBg.setAttribute("rx", "2");
+  const lbl = document.createElementNS(SVG_NS, "text");
+  lbl.setAttribute("class", "crosshair-label");
+  g.append(line, dotMed, lblBg, lbl);
+  svg.appendChild(g);
+  g.style.display = "none";
+
+  let debounceT = null;
+  const announceAt = (d) => {
+    clearTimeout(debounceT);
+    debounceT = setTimeout(() => {
+      readout.textContent =
+        `Day ${d}. Median ${priceFmt(mc.percentiles.p50[d])}, 5th percentile ${priceFmt(mc.percentiles.p05[d])}, 95th percentile ${priceFmt(mc.percentiles.p95[d])}.`;
+    }, 160);
+  };
+  const setAt = (d) => {
+    d = Math.max(0, Math.min(days, d));
+    const x = xScale(d);
+    const p50 = mc.percentiles.p50[d];
+    line.setAttribute("x1", String(x));
+    line.setAttribute("x2", String(x));
+    dotMed.setAttribute("cx", String(x));
+    dotMed.setAttribute("cy", String(yScale(p50)));
+    const text = `D${d}  p50 $${p50.toFixed(2)}  p05 $${mc.percentiles.p05[d].toFixed(2)}  p95 $${mc.percentiles.p95[d].toFixed(2)}`;
+    lbl.textContent = text;
+    const tw = text.length * 6.4 + 10;
+    const th = 16;
+    let tx = x + 8, ty = padT + 6;
+    if (tx + tw > 720) tx = x - tw - 8;
+    lblBg.setAttribute("x", String(tx - 4));
+    lblBg.setAttribute("y", String(ty - 2));
+    lblBg.setAttribute("width", String(tw));
+    lblBg.setAttribute("height", String(th));
+    lbl.setAttribute("x", String(tx + 2));
+    lbl.setAttribute("y", String(ty + 11));
+    g.style.display = "";
+    chartMeta.currentDay = d;
+    announceAt(d);
+  };
+
+  const fromEvent = (e) => {
+    const rect = svg.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * 720;
+    const d = Math.round(((vx - padL) / (720 - padL - 12)) * days);
+    setAt(d);
+  };
+  svg.addEventListener("pointermove", fromEvent);
+  svg.addEventListener("pointerleave", () => {
+    g.style.display = "none";
+    clearTimeout(debounceT);
+  });
+  chart.addEventListener("keydown", (e) => {
+    const cur = chartMeta.currentDay ?? 0;
+    if (e.key === "ArrowRight") { e.preventDefault(); setAt(cur + 1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); setAt(Math.max(0, cur - 1)); }
+    else if (e.key === "Home") { e.preventDefault(); setAt(0); }
+    else if (e.key === "End")  { e.preventDefault(); setAt(days); }
+  });
+  chart.addEventListener("focus", () => { if (chartMeta.currentDay == null) setAt(Math.floor(days / 2)); });
+}
+
 // ========== Init ==========
 function init() {
   state.stocks = buildStocksRuntime();
@@ -1148,8 +1538,12 @@ function init() {
 
   wireEvents();
   renderAll();
+  wireKpiTilt();
   startLiveTicks();
-  announce("Dashboard ready.");
+
+  runBootSequence(() => {
+    announce("Dashboard ready.");
+  });
 }
 
 // Wait for DOM if script tag is at end this runs immediately anyway.
