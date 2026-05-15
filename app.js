@@ -334,23 +334,270 @@ const state = {
   prevAggregateSignal: null,
 };
 
+// =======================================================================
+// ===== REAL-TIME DATA SOURCE (Yahoo Finance via CORS proxy) ============
+// =======================================================================
+
+const dataSource = {
+  // mode: initializing | live | delayed | offline
+  mode: "initializing",
+  source: "—",
+  lastFetch: 0,
+  lastLatencyMs: null,
+  consecutiveErrors: 0,
+  disabled: false,            // permanently offline for this session after N failures
+  hasAnnouncedFallback: false,
+  realHistories: {},          // ticker -> [closes]
+  realCalibrations: {},       // ticker -> { mu, sigma }
+  proxies: [
+    (url) => "https://corsproxy.io/?" + encodeURIComponent(url),
+    (url) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
+  ],
+  proxyIdx: 0,
+
+  async fetchJson(url, timeoutMs = 5000) {
+    const proxied = this.proxies[this.proxyIdx](url);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const start = performance.now();
+    try {
+      const res = await fetch(proxied, { cache: "no-store", signal: ctrl.signal });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      return { data, latencyMs: performance.now() - start };
+    } finally {
+      clearTimeout(t);
+    }
+  },
+
+  async fetchChart(ticker, range = "3mo", interval = "1d") {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=${interval}&range=${range}&includePrePost=false`;
+    return this.fetchJson(url);
+  },
+
+  parseChart(json, ticker) {
+    const r = json?.chart?.result?.[0];
+    if (!r) return null;
+    const meta = r.meta || {};
+    const closes = ((r.indicators?.quote?.[0]?.close) || []).filter((v) => v != null);
+    return {
+      ticker,
+      price: meta.regularMarketPrice ?? closes[closes.length - 1],
+      prevClose: meta.chartPreviousClose ?? meta.previousClose,
+      ts: (meta.regularMarketTime || 0) * 1000,
+      closes,
+    };
+  },
+
+  calibrate(closes) {
+    if (!closes || closes.length < 20) return null;
+    const rets = [];
+    for (let i = 1; i < closes.length; i++) {
+      const r = Math.log(closes[i] / closes[i - 1]);
+      if (isFinite(r)) rets.push(r);
+    }
+    if (rets.length < 15) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const varc = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
+    return { mu: mean * 252, sigma: Math.sqrt(varc * 252) };
+  },
+
+  async bootstrap(tickers) {
+    if (this.disabled) return { ok: false };
+    const start = performance.now();
+    const settled = await Promise.allSettled(
+      tickers.map((t) => this.fetchChart(t, "3mo", "1d"))
+    );
+    let ok = 0;
+    let latSum = 0, latN = 0;
+    settled.forEach((res, i) => {
+      const t = tickers[i];
+      if (res.status === "fulfilled") {
+        const parsed = this.parseChart(res.value.data, t);
+        if (parsed && parsed.price && parsed.closes.length >= 20) {
+          this.realHistories[t] = parsed.closes.slice(-60);
+          this.realCalibrations[t] = this.calibrate(parsed.closes);
+          ok++;
+          latSum += res.value.latencyMs; latN++;
+        }
+      }
+    });
+    if (ok === 0) {
+      this.consecutiveErrors++;
+      if (this.consecutiveErrors >= 2) this.disabled = true;
+      this.setMode("offline", "MOCK");
+      return { ok: false };
+    }
+    this.lastLatencyMs = Math.round(latSum / Math.max(latN, 1));
+    this.lastFetch = Date.now();
+    this.consecutiveErrors = 0;
+    this.source = `YF ${ok}/${tickers.length}`;
+    this.setMode("live", "YF");
+    return { ok: true, count: ok };
+  },
+
+  async pollQuotes(tickers) {
+    if (this.disabled) return false;
+    const settled = await Promise.allSettled(
+      tickers.map((t) => this.fetchChart(t, "1d", "1m"))
+    );
+    let ok = 0;
+    let latSum = 0, latN = 0;
+    const updates = {};
+    settled.forEach((res, i) => {
+      const t = tickers[i];
+      if (res.status === "fulfilled") {
+        const parsed = this.parseChart(res.value.data, t);
+        if (parsed && parsed.price) {
+          updates[t] = { price: parsed.price, prevClose: parsed.prevClose, ts: parsed.ts };
+          ok++;
+          latSum += res.value.latencyMs; latN++;
+        }
+      }
+    });
+    if (ok === 0) {
+      this.consecutiveErrors++;
+      if (this.consecutiveErrors >= 3) {
+        this.disabled = true;
+        this.setMode("offline", "MOCK");
+      } else {
+        this.setMode("delayed", this.source || "YF");
+      }
+      return false;
+    }
+    this.consecutiveErrors = 0;
+    this.lastLatencyMs = Math.round(latSum / Math.max(latN, 1));
+    this.lastFetch = Date.now();
+    // Apply updates into state.stocks
+    if (state.stocks) {
+      for (const s of state.stocks) {
+        const u = updates[s.ticker];
+        if (!u) continue;
+        s.price = u.price;
+        if (u.prevClose) s.prevClose = u.prevClose;
+        s.change = (s.price - s.prevClose) / s.prevClose;
+        s.history[s.history.length - 1] = s.price;
+      }
+    }
+    // Freshness gate: if latest ts is stale, mark delayed
+    const staleAge = Date.now() - this.lastFetch;
+    this.setMode(staleAge > 15000 ? "delayed" : "live", this.source);
+    return true;
+  },
+
+  setMode(newMode, src) {
+    const changed = this.mode !== newMode;
+    this.mode = newMode;
+    if (src) this.source = src;
+    if (changed) onConnModeChange(newMode, this.source);
+    else updateConnStripOnly();
+  },
+};
+
+// ---- Market hours (US Eastern) --------------------------------------
+function nyTimeParts() {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const weekday = parts.find((p) => p.type === "weekday")?.value || "Mon";
+  const hour = +parts.find((p) => p.type === "hour").value;
+  const minute = +parts.find((p) => p.type === "minute").value;
+  return { weekday, mins: (hour % 24) * 60 + minute };
+}
+function marketStatus() {
+  const { weekday, mins } = nyTimeParts();
+  if (weekday === "Sat" || weekday === "Sun") return "WEEKEND";
+  if (mins < 4 * 60) return "CLOSED";
+  if (mins < 9 * 60 + 30) return "PRE";
+  if (mins < 16 * 60) return "OPEN";
+  if (mins < 20 * 60) return "AFTER";
+  return "CLOSED";
+}
+
+// ---- Connection-mode handlers ---------------------------------------
+function updateConnStripOnly() {
+  const el = $("#term-conn");
+  if (!el) return;
+  el.classList.remove("initializing", "live", "delayed", "offline");
+  el.classList.add(dataSource.mode);
+  setText("#term-conn-label", (
+    dataSource.mode === "live" ? "LIVE" :
+    dataSource.mode === "delayed" ? "DELAYED" :
+    dataSource.mode === "offline" ? "OFFLINE" : "INIT"
+  ));
+  setText("#term-conn-src", dataSource.source || "—");
+  if (dataSource.lastLatencyMs != null) {
+    setText("#term-latency", `${Math.round(dataSource.lastLatencyMs)}MS`);
+  }
+}
+
+function onConnModeChange(newMode, source) {
+  updateConnStripOnly();
+  const sess = $("#session-status");
+  const banner = $("#feed-banner");
+
+  if (newMode === "offline") {
+    if (banner && !banner.dataset.dismissed) {
+      banner.hidden = false;
+      setText("#feed-banner-text", "Live feed unavailable — showing simulated data.");
+    }
+    if (!dataSource.hasAnnouncedFallback && sess) {
+      sess.textContent = "Live data feed unavailable. Dashboard is using simulated prices.";
+      dataSource.hasAnnouncedFallback = true;
+    }
+  } else if (newMode === "delayed") {
+    if (sess) sess.textContent = `Live feed delayed. Source: ${source || ""}.`;
+  } else if (newMode === "live") {
+    if (banner && !banner.dataset.dismissed) banner.hidden = true;
+    if (sess) sess.textContent = `Live feed active. Source: ${source || "YF"}.`;
+  }
+}
+
+let lastMarketStatus = null;
+function updateMarketStatus() {
+  const s = marketStatus();
+  const el = $("#term-market");
+  if (!el) return;
+  el.textContent = s === "PRE" ? "PRE-MKT" : s === "AFTER" ? "AFT-HRS" : s;
+  el.classList.remove("open", "pre", "after", "closed", "weekend");
+  el.classList.add(s === "PRE" ? "pre" : s === "AFTER" ? "after" : s.toLowerCase());
+  if (lastMarketStatus && lastMarketStatus !== s) {
+    const sess = $("#session-status");
+    if (sess) sess.textContent = `US market status changed to ${s}.`;
+  }
+  lastMarketStatus = s;
+  return s;
+}
+
 // ========== Enrichment ==========
 function buildStocksRuntime() {
   const stocks = STARRED.map((s) => {
-    const history = generateHistory(s, state.seed);
-    const prevClose = history[history.length - 2];
-    const price = history[history.length - 1];
+    // Prefer real Yahoo history + calibrated mu/sigma when available
+    const realHist = dataSource.realHistories[s.ticker];
+    const cal = dataSource.realCalibrations[s.ticker];
+    let history, mu, sigma, price, prevClose;
+
+    if (realHist && realHist.length >= 20) {
+      history = realHist.slice(-60);
+      price = history[history.length - 1];
+      prevClose = history[history.length - 2] || price;
+      mu = cal?.mu ?? s.mu;
+      sigma = cal?.sigma ?? s.sigma;
+    } else {
+      history = generateHistory(s, state.seed);
+      prevClose = history[history.length - 2];
+      price = history[history.length - 1];
+      mu = s.mu;
+      sigma = s.sigma;
+    }
     const change = (price - prevClose) / prevClose;
     const sentiment = getSentiment(s.ticker);
-    // Quick MC summary for table (fewer sims, fixed 30d)
-    const mc = monteCarlo({ S0: price, mu: s.mu, sigma: s.sigma, days: 30, nPaths: 500, seed: state.seed + hashString(s.ticker) });
+    const mc = monteCarlo({ S0: price, mu, sigma, days: 30, nPaths: 500, seed: state.seed + hashString(s.ticker) });
     return {
-      ...s,
-      price,
-      prevClose,
-      change,
-      history,
-      sentiment,
+      ticker: s.ticker, name: s.name, sector: s.sector,
+      mu, sigma, price, prevClose, change, history, sentiment,
       mcSummary: mc.summary,
     };
   });
@@ -545,7 +792,6 @@ function renderKPIs() {
   setText("#term-paths", state.sims >= 1000 ? (state.sims / 1000) + "K" : String(state.sims));
   setText("#term-seed", String(state.seed));
   setText("#term-watch", String(state.stocks.length));
-  setText("#term-live", String(state.stocks.length));
 }
 
 function setText(sel, txt) {
@@ -556,9 +802,11 @@ function setText(sel, txt) {
 function renderStocksTable() {
   const body = $("#stocks-body");
 
-  // Compute per-ticker price deltas and signal changes before re-rendering
+  // Compute per-ticker price deltas, signal changes, conviction changes before re-rendering
   const priceChanges = {};
   const signalChanges = {};
+  const convictionChanges = {};
+  if (!state.prevConviction) state.prevConviction = {};
   for (const s of state.stocks) {
     const prev = state.prevPrices[s.ticker];
     if (prev != null && Math.abs(prev - s.price) > 1e-6) {
@@ -571,6 +819,12 @@ function renderStocksTable() {
       signalChanges[s.ticker] = true;
     }
     state.prevSignals[s.ticker] = combined;
+
+    const conv = convictionFromStock(s);
+    const convKey = `${conv.score}:${conv.neg ? 1 : 0}`;
+    const prevConv = state.prevConviction[s.ticker];
+    if (prevConv !== convKey) convictionChanges[s.ticker] = true;
+    state.prevConviction[s.ticker] = convKey;
   }
 
   let rows = state.stocks.map((s) => {
@@ -601,6 +855,7 @@ function renderStocksTable() {
     const sentScore = pctFmt(s.sentiment.score, 0);
     const dotCls = s.combinedSignal.signal === "BUY" ? "buy" : s.combinedSignal.signal === "SELL" ? "sell" : "unsure";
     const conviction = convictionFromStock(s);
+    const convAnim = convictionChanges[s.ticker] ? " animate" : "";
     const spark = sparklineSvg(s.history, s.change >= 0);
     const spark60 = pctFmt((s.history[s.history.length - 1] - s.history[0]) / s.history[0]);
     const press = pressureFromStock(s);
@@ -615,7 +870,7 @@ function renderStocksTable() {
         <td class="num">${ciLabel}</td>
         <td class="num">${sentDom} ${sentScore}</td>
         <td class="pressure-cell">${pressureBar(press)}</td>
-        <td>${convictionBar(conviction)}</td>
+        <td>${convictionBar(conviction, convAnim)}</td>
         <td>${signalBadge(s.combinedSignal.signal, { context: s.combinedSignal.detail })}</td>
       </tr>
     `;
@@ -675,12 +930,12 @@ function convictionFromStock(s) {
   return { score, neg };
 }
 
-function convictionBar({ score, neg }) {
+function convictionBar({ score, neg }, animExtra = "") {
   const cells = Array.from({ length: 8 }, (_, i) =>
     `<span class="cell ${i < score ? "on" : ""} ${neg ? "neg" : ""}"></span>`
   ).join("");
   const label = `Conviction ${score} of 8, ${neg ? "bearish" : "bullish"}`;
-  return `<span class="bar" role="img" aria-label="${label}">${cells}</span>`;
+  return `<span class="bar${animExtra}" role="img" aria-label="${label}">${cells}</span>`;
 }
 
 function getCombinedSignalForStock(s) {
@@ -765,6 +1020,11 @@ function renderChart(mc, stock, onComplete) {
   // Build frame SVG with placeholders that will be animated in
   $("#mc-chart").innerHTML = `
     <svg viewBox="0 0 ${svgW} ${svgH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${escapeAttr(chartAriaLabel)}">
+      <defs>
+        <clipPath id="mc-reveal-clip">
+          <rect id="mc-reveal-rect" x="${padL}" y="${padT - 2}" width="0" height="${innerH + 4}"></rect>
+        </clipPath>
+      </defs>
       <rect x="0" y="0" width="${svgW}" height="${svgH}" fill="transparent"></rect>
       ${gridVals.map((v) => `
         <line x1="${padL}" x2="${svgW - padR}" y1="${yScale(v)}" y2="${yScale(v)}" stroke="#1a2029" stroke-dasharray="2 4" />
@@ -775,12 +1035,14 @@ function renderChart(mc, stock, onComplete) {
       `).join("")}
       <line x1="${padL}" y1="${yScale(mc.S0)}" x2="${svgW - padR}" y2="${yScale(mc.S0)}" stroke="#d6dce4" stroke-opacity="0.18" stroke-width="1" stroke-dasharray="2 2"></line>
       <text x="${svgW - padR}" y="${yScale(mc.S0) - 4}" fill="#7f8693" font-size="10" text-anchor="end" font-family="JetBrains Mono, monospace">S₀ = $${mc.S0.toFixed(2)}</text>
-      <g id="paths-layer"></g>
+      <g id="paths-layer" clip-path="url(#mc-reveal-clip)"></g>
+      <line id="mc-sweep-line" x1="${padL}" y1="${padT - 2}" x2="${padL}" y2="${padT + innerH + 2}" stroke="#00ff88" stroke-width="1" stroke-opacity="0" style="filter: drop-shadow(0 0 6px rgba(0,255,136,0.6));"></line>
       <path id="mc-band" d="${bandPath()}" fill="rgba(0,255,136,0.08)" stroke="none" opacity="0"></path>
       <path id="mc-p05" d="${toPath(mc.percentiles.p05)}" fill="none" stroke="#00ff88" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.6" opacity="0"></path>
       <path id="mc-p95" d="${toPath(mc.percentiles.p95)}" fill="none" stroke="#00ff88" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.6" opacity="0"></path>
       <path id="mc-median" d="${toPath(mc.percentiles.p50)}" fill="none" stroke="#00ff88" stroke-width="2.25" stroke-linecap="round" opacity="0"></path>
       <text id="mc-counter" x="${padL}" y="${padT + 14}" font-size="11" text-anchor="start">0 / ${mc.nPaths.toLocaleString()} PATHS</text>
+      <text id="mc-day-label" x="${svgW - padR}" y="${padT + 14}" font-size="10" text-anchor="end" fill="#7f8693" font-family="JetBrains Mono, monospace">DAY 0 / ${days}</text>
     </svg>
   `;
 
@@ -804,10 +1066,17 @@ function renderChart(mc, stock, onComplete) {
   const figure = document.querySelector(".chart-wrap");
   const layer = $("#paths-layer");
   const counter = $("#mc-counter");
+  const dayLabel = $("#mc-day-label");
+  const revealRect = $("#mc-reveal-rect");
+  const sweepLine = $("#mc-sweep-line");
   const reduced = prefersReducedMotion();
 
+  // Cancel any previous sim loop on re-entry
+  if (state._mcRaf) { cancelAnimationFrame(state._mcRaf); state._mcRaf = null; }
+
   const drawPaths = () => {
-    const paths = mc.samplePaths.map((arr, i) => {
+    // Mount every path at full geometry, revealed by clip-path wipe
+    mc.samplePaths.forEach((arr) => {
       const p = document.createElementNS(SVG_NS, "path");
       p.setAttribute("d", toPath(arr));
       p.setAttribute("fill", "none");
@@ -815,59 +1084,65 @@ function renderChart(mc, stock, onComplete) {
       p.setAttribute("stroke-width", "1");
       p.setAttribute("stroke-opacity", "0.18");
       layer.appendChild(p);
-      return { el: p, idx: i };
     });
 
+    const totalLabel = mc.nPaths.toLocaleString();
+    const revealOverlays = () => {
+      const reveal = [["#mc-band", 0], ["#mc-p05", 80], ["#mc-p95", 120], ["#mc-median", 180]];
+      reveal.forEach(([sel, delay]) => {
+        const e = $(sel);
+        if (!e) return;
+        e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 460, delay, easing: "cubic-bezier(0.22,1,0.36,1)", fill: "forwards" });
+      });
+    };
+
     if (reduced) {
-      paths.forEach(({ el }) => { el.style.strokeDashoffset = 0; });
-      counter.textContent = `${mc.nPaths.toLocaleString()} / ${mc.nPaths.toLocaleString()} PATHS`;
+      revealRect.setAttribute("width", innerW);
+      counter.textContent = `${totalLabel} / ${totalLabel} PATHS`;
+      dayLabel.textContent = `DAY ${days} / ${days}`;
       ["#mc-band", "#mc-p05", "#mc-p95", "#mc-median"].forEach((sel) => $(sel).setAttribute("opacity", "1"));
       figure.classList.remove("simulating");
       if (onComplete) onComplete();
       return;
     }
 
-    const displayStep = mc.nPaths / paths.length;
-    let drawnCount = 0;
-    const perPath = Math.max(480, Math.min(720, 2400 / Math.max(paths.length, 1)));
-    const staggerMs = Math.max(8, Math.min(30, 1800 / Math.max(paths.length, 1)));
+    // Duration scales with horizon but bounded for snappy feel
+    const duration = Math.max(1400, Math.min(2600, 55 * days + 900));
+    const startTs = performance.now();
+    const easeOutExpo = (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
 
-    paths.forEach(({ el, idx }) => {
-      const len = el.getTotalLength();
-      el.style.strokeDasharray = len;
-      el.style.strokeDashoffset = len;
-      const anim = el.animate(
-        [{ strokeDashoffset: len }, { strokeDashoffset: 0 }],
-        { duration: perPath, delay: idx * staggerMs, easing: "cubic-bezier(0.16,1,0.3,1)", fill: "forwards" }
-      );
-      anim.onfinish = () => {
-        drawnCount++;
-        const shown = Math.min(mc.nPaths, Math.round(drawnCount * displayStep));
-        counter.textContent = `${shown.toLocaleString()} / ${mc.nPaths.toLocaleString()} PATHS`;
-        if (drawnCount === paths.length) {
-          const reveal = [
-            ["#mc-band", 0],
-            ["#mc-p05", 80],
-            ["#mc-p95", 120],
-            ["#mc-median", 180],
-          ];
-          reveal.forEach(([sel, d]) => {
-            const e = $(sel);
-            if (!e) return;
-            e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 420, delay: d, easing: "cubic-bezier(0.25,1,0.5,1)", fill: "forwards" });
-          });
-          setTimeout(() => {
-            figure.classList.remove("simulating");
-            if (onComplete) onComplete();
-          }, 620);
-          counter.textContent = `${mc.nPaths.toLocaleString()} PATHS · E[R] ${pctFmt(s.expectedReturn)}`;
-        }
-      };
-    });
+    sweepLine.setAttribute("stroke-opacity", "0.9");
+
+    const tick = (now) => {
+      const t = Math.min(1, (now - startTs) / duration);
+      const eased = easeOutExpo(t);
+      const currentW = eased * innerW;
+      const dayCursor = eased * days;
+      revealRect.setAttribute("width", currentW.toFixed(2));
+      sweepLine.setAttribute("x1", (padL + currentW).toFixed(2));
+      sweepLine.setAttribute("x2", (padL + currentW).toFixed(2));
+      const shown = Math.min(mc.nPaths, Math.round(eased * mc.nPaths));
+      counter.textContent = `${shown.toLocaleString()} / ${totalLabel} PATHS`;
+      dayLabel.textContent = `DAY ${Math.round(dayCursor)} / ${days}`;
+      if (t < 1) {
+        state._mcRaf = requestAnimationFrame(tick);
+      } else {
+        state._mcRaf = null;
+        // Fade out the sweep line, then reveal the summary overlays
+        sweepLine.animate([{ strokeOpacity: 0.9 }, { strokeOpacity: 0 }], { duration: 360, easing: "cubic-bezier(0.22,1,0.36,1)", fill: "forwards" });
+        revealOverlays();
+        counter.textContent = `${totalLabel} PATHS · E[R] ${pctFmt(s.expectedReturn)}`;
+        setTimeout(() => {
+          figure.classList.remove("simulating");
+          if (onComplete) onComplete();
+        }, 640);
+      }
+    };
+    state._mcRaf = requestAnimationFrame(tick);
   };
 
   figure.classList.add("simulating");
-  // Defer to next frame so DOM is settled before computing getTotalLength
+  // Defer to next frame so DOM is mounted before animation begins
   requestAnimationFrame(drawPaths);
 
   // Wire crosshair (feature 10)
@@ -1009,25 +1284,37 @@ function startLiveTicks() {
   if (tickTimer) clearInterval(tickTimer);
   if (uptimeTimer) clearInterval(uptimeTimer);
 
-  // Uptime ticks every second for the terminal strip
   uptimeTimer = setInterval(() => {
     setText("#term-uptime", formatUptime(Date.now() - bootTime));
-    // jitter latency for atmosphere (1-4 ms)
-    const lat = 1 + Math.floor(Math.random() * 4);
-    setText("#term-latency", lat + "MS");
+    updateMarketStatus();
+    // latency shown only if real — don't inject fake numbers
+    if (dataSource.lastLatencyMs == null && dataSource.mode === "offline") {
+      setText("#term-latency", "LOCAL");
+    }
   }, 1000);
 
-  tickTimer = setInterval(() => {
-    // small random walk per stock
+  const mockTick = () => {
     for (const s of state.stocks) {
-      const rng = Math.random;
       const dt = 1 / (252 * 24);
-      const z = (rng() - 0.5) * 2 * 1.2;
+      const z = (Math.random() - 0.5) * 2 * 1.2;
       const delta = (s.mu - 0.5 * s.sigma ** 2) * dt + s.sigma * Math.sqrt(dt) * z;
-      const newPrice = s.price * Math.exp(delta);
-      s.price = Math.max(1, newPrice);
+      s.price = Math.max(1, s.price * Math.exp(delta));
       s.history[s.history.length - 1] = s.price;
       s.change = (s.price - s.prevClose) / s.prevClose;
+    }
+  };
+
+  const tick = async () => {
+    let usedReal = false;
+    const mkt = marketStatus();
+    if (!dataSource.disabled && mkt !== "WEEKEND" && mkt !== "CLOSED") {
+      try {
+        usedReal = await dataSource.pollQuotes(state.stocks.map((s) => s.ticker));
+      } catch (_) { usedReal = false; }
+    }
+    if (!usedReal) {
+      if (dataSource.disabled) dataSource.setMode("offline", "MOCK");
+      mockTick();
     }
     state.portfolio = computePortfolioKpis(state.stocks);
     const now = new Date();
@@ -1035,8 +1322,25 @@ function startLiveTicks() {
     t.textContent = now.toLocaleTimeString();
     t.setAttribute("datetime", now.toISOString());
     renderKPIs();
+    renderGauges();
+    renderHeatmap();
+    renderTickerTape();
     renderStocksTable();
-  }, 3000);
+  };
+
+  // Cadence: faster while market open, slower when closed, slowest when offline
+  const cadence = () => {
+    if (dataSource.disabled) return 3000;
+    const m = marketStatus();
+    if (m === "OPEN") return 7000;
+    if (m === "PRE" || m === "AFTER") return 15000;
+    return 30000;
+  };
+  const loop = async () => {
+    await tick();
+    tickTimer = setTimeout(loop, cadence());
+  };
+  tickTimer = setTimeout(loop, cadence());
 }
 
 // ========== Event wiring ==========
@@ -1117,6 +1421,32 @@ function wireEvents() {
       const idx = rows.indexOf(tr);
       const next = e.key === "ArrowDown" ? rows[idx + 1] : rows[idx - 1];
       if (next) next.focus();
+    }
+  });
+
+  // Feed banner buttons
+  const banner = $("#feed-banner");
+  const dismissBtn = $("#feed-dismiss");
+  const retryBtn = $("#feed-retry");
+  if (dismissBtn) dismissBtn.addEventListener("click", () => {
+    banner.hidden = true;
+    banner.dataset.dismissed = "1";
+  });
+  if (retryBtn) retryBtn.addEventListener("click", async () => {
+    retryBtn.disabled = true;
+    retryBtn.textContent = "Retrying…";
+    dataSource.disabled = false;
+    dataSource.consecutiveErrors = 0;
+    const ok = await dataSource.bootstrap(STARRED.map((s) => s.ticker));
+    retryBtn.disabled = false;
+    retryBtn.textContent = "Retry";
+    if (ok.ok) {
+      state.stocks = buildStocksRuntime();
+      state.portfolio = computePortfolioKpis(state.stocks);
+      renderAll();
+      banner.hidden = true;
+    } else {
+      setText("#feed-banner-text", "Live feed still unavailable. Continuing with simulation.");
     }
   });
 
@@ -1526,7 +1856,20 @@ function wireChartCrosshair(mc, chartMeta) {
 }
 
 // ========== Init ==========
-function init() {
+async function init() {
+  updateConnStripOnly();
+  updateMarketStatus();
+
+  // Try real Yahoo Finance bootstrap in background; stocks are built either way
+  const bootstrapPromise = dataSource.bootstrap(STARRED.map((s) => s.ticker)).catch(() => ({ ok: false }));
+
+  // Kick off boot sequence in parallel so UI feels responsive
+  runBootSequence(() => {
+    announce("Dashboard ready.");
+  });
+
+  const result = await bootstrapPromise;
+
   state.stocks = buildStocksRuntime();
   state.portfolio = computePortfolioKpis(state.stocks);
 
@@ -1541,9 +1884,8 @@ function init() {
   wireKpiTilt();
   startLiveTicks();
 
-  runBootSequence(() => {
-    announce("Dashboard ready.");
-  });
+  const src = result.ok ? `real Yahoo Finance data for ${result.count} tickers` : "simulated data (live feed unavailable)";
+  announce(`Dashboard ready with ${src}.`);
 }
 
 // Wait for DOM if script tag is at end this runs immediately anyway.

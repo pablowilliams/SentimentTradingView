@@ -40,13 +40,29 @@
   <div class="term-strip" role="status" aria-label="Session status">
     <span class="kv"><span class="brand-dot" aria-hidden="true"></span><span>STV</span></span>
     <span class="kv"><span>WATCH</span> <span class="v" id="term-watch">10</span></span>
-    <span class="kv ok"><span>LIVE</span> <span class="v" id="term-live">10</span></span>
+    <span class="kv term-conn initializing" id="term-conn" aria-label="Data feed connection status">
+      <span class="conn-shape" aria-hidden="true"></span>
+      <span id="term-conn-label">INIT</span>
+      <span class="v" id="term-conn-src">—</span>
+    </span>
+    <span class="kv" id="term-mkt-wrap"><span>MKT</span> <span class="v" id="term-market" title="US equity market session">—</span></span>
     <span class="kv"><span>HORIZON</span> <span class="v" id="term-horizon">30D</span></span>
     <span class="kv"><span>PATHS</span> <span class="v" id="term-paths">1K</span></span>
     <span class="kv"><span>SEED</span> <span class="v" id="term-seed">42</span></span>
-    <span class="kv"><span>LATENCY</span> <span class="v" id="term-latency">2MS</span></span>
+    <span class="kv"><span>LATENCY</span> <span class="v" id="term-latency">—</span></span>
     <span class="kv ok"><span>UPTIME</span> <span class="v" id="term-uptime">00:00:00</span></span>
   </div>
+
+  <!-- ===== Feed banner (only visible when real feed falls back) ===== -->
+  <div id="feed-banner" class="feed-banner" role="status" hidden>
+    <span class="feed-banner-icon" aria-hidden="true">!</span>
+    <span class="feed-banner-text" id="feed-banner-text">Live feed unavailable — showing simulated data.</span>
+    <button type="button" id="feed-retry" class="feed-btn">Retry</button>
+    <button type="button" id="feed-dismiss" class="feed-btn feed-btn-icon" aria-label="Dismiss feed notice">×</button>
+  </div>
+
+  <!-- Session-status live region for connection/market transitions only -->
+  <span id="session-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
 
   <!-- ===== Header ===== -->
   <header class="app-header" role="banner">
@@ -179,6 +195,7 @@
 
           <div class="grid-2">
             <figure class="chart-wrap" aria-labelledby="mc-heading">
+              <span class="chart-crt-layer" aria-hidden="true"></span>
               <h3 id="mc-heading">Monte Carlo price paths</h3>
               <div id="mc-chart" role="img" aria-label="Loading chart" tabindex="0" aria-describedby="mc-crosshair-help"></div>
               <p id="mc-crosshair-help" class="sr-only">Use left and right arrow keys to move the crosshair across trading days; press Home or End to jump to first or last day.</p>

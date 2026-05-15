@@ -929,22 +929,25 @@ table.stocks tbody tr[aria-pressed="true"] { box-shadow: inset 2px 0 0 var(--acc
 .status-dot.buy,
 .status-dot.sell { animation: dotPulse 2.4s var(--ease-out-quart) infinite; }
 
-/* Conviction bar fill-in stagger */
+/* Conviction bar fill-in stagger — only when .animate is set on change */
 .bar .cell { transform-origin: left center; }
-.bar .cell.on {
-  animation: cellFill 340ms var(--ease-out-expo) both;
+.bar.animate .cell.on {
+  animation: cellFill 360ms var(--ease-out-expo) both;
 }
-.bar .cell.on:nth-child(1) { animation-delay: 0ms; }
-.bar .cell.on:nth-child(2) { animation-delay: 35ms; }
-.bar .cell.on:nth-child(3) { animation-delay: 70ms; }
-.bar .cell.on:nth-child(4) { animation-delay: 105ms; }
-.bar .cell.on:nth-child(5) { animation-delay: 140ms; }
-.bar .cell.on:nth-child(6) { animation-delay: 175ms; }
-.bar .cell.on:nth-child(7) { animation-delay: 210ms; }
-.bar .cell.on:nth-child(8) { animation-delay: 245ms; }
+.bar.animate .cell.on:nth-child(1) { animation-delay: 0ms; }
+.bar.animate .cell.on:nth-child(2) { animation-delay: 40ms; }
+.bar.animate .cell.on:nth-child(3) { animation-delay: 80ms; }
+.bar.animate .cell.on:nth-child(4) { animation-delay: 120ms; }
+.bar.animate .cell.on:nth-child(5) { animation-delay: 160ms; }
+.bar.animate .cell.on:nth-child(6) { animation-delay: 200ms; }
+.bar.animate .cell.on:nth-child(7) { animation-delay: 240ms; }
+.bar.animate .cell.on:nth-child(8) { animation-delay: 280ms; }
 @keyframes cellFill {
   from { transform: scaleX(0.1); opacity: 0; filter: brightness(1.8); }
   to   { transform: scaleX(1); opacity: 1; filter: brightness(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar.animate .cell.on { animation: none !important; }
 }
 
 /* Badge subtle pulse on update */
@@ -1000,6 +1003,41 @@ table.stocks tbody tr[aria-pressed="true"] { box-shadow: inset 2px 0 0 var(--acc
   border-radius: 3px;
 }
 .chart-wrap > * { position: relative; z-index: 1; }
+
+/* CRT scanlines + flicker — only while simulating */
+.chart-crt-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 3;
+  border-radius: inherit;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0,255,136,0.07) 0px,
+    rgba(0,255,136,0.07) 1px,
+    transparent 2px,
+    transparent 4px
+  );
+  mix-blend-mode: screen;
+  transition: opacity 180ms var(--ease-out-quart);
+}
+.chart-wrap.simulating .chart-crt-layer {
+  opacity: 1;
+  animation: crtScanFlicker 2.6s steps(60, end) infinite;
+}
+@keyframes crtScanFlicker {
+  0%, 7%, 9%, 18%, 20%, 35%, 37%, 62%, 64%, 89%, 91%, 100% { opacity: 1; }
+  8%   { opacity: 0.78; }
+  19%  { opacity: 0.84; }
+  36%  { opacity: 0.66; }
+  63%  { opacity: 0.88; }
+  90%  { opacity: 0.7; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-wrap.simulating .chart-crt-layer { animation: none; opacity: 0.35; }
+  .chart-wrap.simulating::before { animation: none; opacity: 0; }
+}
 
 /* Counter inside chart */
 #mc-counter {
@@ -1492,6 +1530,121 @@ table.stocks tbody tr:focus-visible {
   stroke: var(--accent);
   stroke-width: 1;
 }
+
+/* Real-time connection indicator (shape + text + 3:1 contrast) */
+.term-conn {
+  gap: 6px !important;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+}
+.term-conn .conn-shape {
+  display: inline-block;
+  width: 8px; height: 8px;
+  position: relative;
+  flex-shrink: 0;
+}
+.term-conn.live .conn-shape {
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse 2s ease-in-out infinite;
+}
+.term-conn.live { color: var(--accent); border-color: rgba(0,255,136,0.35); }
+.term-conn.live #term-conn-label { color: var(--accent); font-weight: 800; }
+
+.term-conn.delayed .conn-shape {
+  width: 0; height: 0;
+  background: transparent;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 8px solid var(--warn);
+  box-shadow: none;
+}
+.term-conn.delayed { color: var(--warn); border-color: rgba(255,204,51,0.35); }
+.term-conn.delayed #term-conn-label { color: var(--warn); font-weight: 800; }
+
+.term-conn.offline .conn-shape {
+  background: transparent;
+  color: var(--danger);
+}
+.term-conn.offline .conn-shape::before,
+.term-conn.offline .conn-shape::after {
+  content: "";
+  position: absolute;
+  left: 0; top: 50%;
+  width: 100%; height: 2px;
+  background: var(--danger);
+  transform-origin: center;
+}
+.term-conn.offline .conn-shape::before { transform: translateY(-50%) rotate(45deg); }
+.term-conn.offline .conn-shape::after  { transform: translateY(-50%) rotate(-45deg); }
+.term-conn.offline { color: var(--danger); border-color: rgba(255,51,102,0.45); }
+.term-conn.offline #term-conn-label { color: var(--danger); font-weight: 800; }
+
+.term-conn.initializing .conn-shape {
+  width: 8px; height: 8px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  opacity: 0.6;
+}
+.term-conn.initializing #term-conn-label { color: var(--text-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .term-conn.live .conn-shape { animation: none; }
+}
+
+/* Market status pill coloring */
+#term-market.open      { color: var(--accent); font-weight: 800; }
+#term-market.pre,
+#term-market.after     { color: var(--warn);   font-weight: 800; }
+#term-market.closed,
+#term-market.weekend   { color: var(--text-muted); font-weight: 800; }
+
+/* Feed banner (non-blocking, dismissible) */
+.feed-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: rgba(255,204,51,0.08);
+  border: 1px solid rgba(255,204,51,0.45);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r);
+  font-size: 11.5px;
+  color: var(--text);
+  letter-spacing: 0.03em;
+}
+.feed-banner[hidden] { display: none; }
+.feed-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: #000;
+  font-weight: 900;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.feed-banner-text { flex: 1; }
+.feed-btn {
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.feed-btn:hover { background: rgba(255,204,51,0.12); }
+.feed-btn-icon { padding: 2px 8px; font-size: 14px; line-height: 1; letter-spacing: 0; }
 
 /* Responsive: hide sparkline + pressure column on small screens */
 @media (max-width: 900px) {
