@@ -349,11 +349,28 @@ const dataSource = {
   hasAnnouncedFallback: false,
   realHistories: {},          // ticker -> [closes]
   realCalibrations: {},       // ticker -> { mu, sigma }
+  staticSnapshotAt: null,     // ISO timestamp from data/quotes.json when same-origin path used
   proxies: [
     (url) => "https://corsproxy.io/?" + encodeURIComponent(url),
     (url) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
   ],
   proxyIdx: 0,
+
+  // Same-origin static snapshot, refreshed by a GitHub Action on a cron.
+  // No CORS, no third-party proxy, no rate limit. Works on plain GitHub Pages.
+  async loadSameOriginSnapshot() {
+    try {
+      const start = performance.now();
+      const res = await fetch("./data/quotes.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (!data || !data.tickers) throw new Error("malformed snapshot");
+      this.staticSnapshotAt = data.generatedAt || null;
+      return { data, latencyMs: performance.now() - start };
+    } catch (e) {
+      return null;
+    }
+  },
 
   async fetchJson(url, timeoutMs = 5000) {
     const proxied = this.proxies[this.proxyIdx](url);
@@ -404,7 +421,36 @@ const dataSource = {
 
   async bootstrap(tickers) {
     if (this.disabled) return { ok: false };
-    const start = performance.now();
+
+    // Step 1: same-origin static snapshot. Refreshed every 20 min during US
+    // trading hours by .github/workflows/refresh-data.yml. No CORS, no proxy,
+    // no rate limit. This is the path that makes the deployed site work.
+    const snap = await this.loadSameOriginSnapshot();
+    if (snap && snap.data && snap.data.tickers) {
+      let ok = 0;
+      for (const t of tickers) {
+        const r = snap.data.tickers[t];
+        if (r && r.price && Array.isArray(r.closes) && r.closes.length >= 20) {
+          this.realHistories[t] = r.closes.slice(-60);
+          this.realCalibrations[t] = this.calibrate(r.closes);
+          ok++;
+        }
+      }
+      if (ok > 0) {
+        const ageMs = this.staticSnapshotAt ? (Date.now() - Date.parse(this.staticSnapshotAt)) : null;
+        const fresh = ageMs != null && ageMs < 30 * 60 * 1000;
+        this.lastLatencyMs = Math.round(snap.latencyMs);
+        this.lastFetch = Date.now();
+        this.consecutiveErrors = 0;
+        this.source = `STATIC ${ok}/${tickers.length}`;
+        this.setMode(fresh ? "live" : "delayed", "STATIC");
+        return { ok: true, count: ok, source: "static" };
+      }
+    }
+
+    // Step 2: try the legacy CORS proxy chain. Mostly broken in production
+    // (corsproxy.io requires a paid plan, allorigins.win is flaky), but kept
+    // for local development and as a defense-in-depth fallback.
     const settled = await Promise.allSettled(
       tickers.map((t) => this.fetchChart(t, "3mo", "1d"))
     );
@@ -433,11 +479,48 @@ const dataSource = {
     this.consecutiveErrors = 0;
     this.source = `YF ${ok}/${tickers.length}`;
     this.setMode("live", "YF");
-    return { ok: true, count: ok };
+    return { ok: true, count: ok, source: "proxy" };
   },
 
   async pollQuotes(tickers) {
     if (this.disabled) return false;
+
+    // If we are running on the same-origin snapshot, just re-read it. The cron
+    // refreshes it every 20 minutes during the trading day, so this is the
+    // correct cadence and it costs one same-origin GET.
+    if (this.source && this.source.startsWith("STATIC")) {
+      const snap = await this.loadSameOriginSnapshot();
+      if (!snap || !snap.data || !snap.data.tickers) {
+        this.setMode("delayed", "STATIC");
+        return false;
+      }
+      const updates = {};
+      let ok = 0;
+      for (const t of tickers) {
+        const r = snap.data.tickers[t];
+        if (r && r.price) {
+          updates[t] = { price: r.price, prevClose: r.prevClose, ts: r.ts };
+          ok++;
+        }
+      }
+      if (state.stocks) {
+        for (const s of state.stocks) {
+          const u = updates[s.ticker];
+          if (!u) continue;
+          s.price = u.price;
+          if (u.prevClose) s.prevClose = u.prevClose;
+          s.change = (s.price - s.prevClose) / s.prevClose;
+          s.history[s.history.length - 1] = s.price;
+        }
+      }
+      this.lastLatencyMs = Math.round(snap.latencyMs);
+      this.lastFetch = Date.now();
+      const ageMs = this.staticSnapshotAt ? (Date.now() - Date.parse(this.staticSnapshotAt)) : null;
+      const fresh = ageMs != null && ageMs < 30 * 60 * 1000;
+      this.setMode(fresh ? "live" : "delayed", this.source);
+      return ok > 0;
+    }
+
     const settled = await Promise.allSettled(
       tickers.map((t) => this.fetchChart(t, "1d", "1m"))
     );

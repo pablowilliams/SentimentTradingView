@@ -1,0 +1,106 @@
+name: Refresh market data
+
+on:
+  schedule:
+    # Every 20 minutes during US trading hours (13:30 to 20:00 UTC, Mon-Fri),
+    # plus one pre-open at 13:00 UTC and one after-hours at 20:30 UTC.
+    - cron: "0,20,40 13-19 * * 1-5"
+    - cron: "0 20 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch and write data/quotes.json
+        env:
+          TICKERS: "AAPL MSFT NVDA TSLA GOOGL AMZN META JPM V SPY"
+        run: |
+          node --input-type=module - <<'EOF'
+          import { writeFileSync, mkdirSync } from "node:fs";
+
+          const TICKERS = process.env.TICKERS.split(/\s+/).filter(Boolean);
+
+          async function fetchChart(ticker) {
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=3mo&includePrePost=false`;
+            const res = await fetch(url, {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; SentimentTradingView/1.0; +https://github.com/pablowilliams/SentimentTradingView)",
+                "Accept": "application/json",
+              },
+            });
+            if (!res.ok) throw new Error(`${ticker} HTTP ${res.status}`);
+            return res.json();
+          }
+
+          function parse(json, ticker) {
+            const r = json?.chart?.result?.[0];
+            if (!r) return null;
+            const meta = r.meta || {};
+            const closes = ((r.indicators?.quote?.[0]?.close) || []).filter((v) => v != null);
+            return {
+              ticker,
+              price: meta.regularMarketPrice ?? closes[closes.length - 1],
+              prevClose: meta.chartPreviousClose ?? meta.previousClose,
+              ts: (meta.regularMarketTime || 0) * 1000,
+              currency: meta.currency || "USD",
+              exchange: meta.exchangeName || null,
+              closes,
+            };
+          }
+
+          const out = { generatedAt: new Date().toISOString(), source: "yahoo-finance-v8", tickers: {} };
+          for (const t of TICKERS) {
+            try {
+              const json = await fetchChart(t);
+              const p = parse(json, t);
+              if (p && p.price && p.closes.length >= 20) {
+                out.tickers[t] = p;
+                console.log(`OK  ${t}  ${p.price}  ${p.closes.length} closes`);
+              } else {
+                console.log(`SKIP ${t}  insufficient data`);
+              }
+            } catch (e) {
+              console.log(`FAIL ${t}  ${e.message}`);
+            }
+            // gentle pacing
+            await new Promise((r) => setTimeout(r, 250));
+          }
+
+          if (Object.keys(out.tickers).length === 0) {
+            console.error("No tickers fetched. Aborting commit.");
+            process.exit(1);
+          }
+          mkdirSync("data", { recursive: true });
+          writeFileSync("data/quotes.json", JSON.stringify(out, null, 2));
+          console.log(`Wrote data/quotes.json with ${Object.keys(out.tickers).length} tickers.`);
+          EOF
+
+      - name: Commit if changed
+        run: |
+          if ! git diff --quiet data/quotes.json 2>/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/quotes.json
+            git commit -m "data: refresh quotes ($(date -u +%Y-%m-%dT%H:%MZ))"
+            git push
+          else
+            echo "No changes to quotes.json"
+          fi

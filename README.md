@@ -15,13 +15,22 @@ Interactive Monte Carlo simulation portfolio dashboard for TradingView-starred s
 
 ## Running
 
-No build step. Open `index.html` in a browser, or serve locally:
+No build step. Live at https://pablowilliams.github.io/SentimentTradingView/.
+
+For local development, any static server works:
 
 ```bash
 python3 -m http.server 8000
+# then visit http://localhost:8000
 ```
 
-Then visit http://localhost:8000.
+## Data pipeline
+
+The dashboard works on plain GitHub Pages with no backend and no third-party CORS proxy. A scheduled GitHub Action (`.github/workflows/refresh-data.yml`) fetches Yahoo Finance v8 for the watchlist every 20 minutes during US trading hours and commits the result to `data/quotes.json`. The dashboard reads that file with a same-origin `fetch` on load and on each tick, so there is nothing in the data path that can fail because of CORS, rate limits, or proxy outages.
+
+The watchlist is defined in two places: `STARRED` at the top of `app.js` for client-side display, and the `TICKERS` env in the refresh-data workflow for the cron fetch. Keep them in sync.
+
+If the same-origin snapshot is missing or empty (for example during local development before the cron has ever run), the dashboard falls back to a CORS proxy chain, then to fully mocked random walks. The connection strip in the bottom toolbar shows which path is active.
 
 ## Architecture
 
